@@ -1,0 +1,16 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Tauri
+src-tauri/target/
+
+# macOS
+.DS_Store
