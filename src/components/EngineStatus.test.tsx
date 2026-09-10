@@ -201,3 +201,70 @@ it('shows a distinct message when the supervisor gives up', async () => {
   expect(screen.getByText(/failed to restart/i)).toBeDefined();
   expect(screen.queryByText(/^Engine error:/)).toBeNull();
 });
+
+it('ignores a stale handshake failure when the engine crashes again before it rejects', async () => {
+  // The first handshake attempt is left unresolved so we can control when
+  // (and whether) it settles relative to the restart below.
+  let rejectFirstHandshake: ((err: unknown) => void) | undefined;
+  healthMock.mockReturnValueOnce(
+    new Promise((_resolve, reject) => {
+      rejectFirstHandshake = reject;
+    }),
+  );
+
+  let emit: ((s: 'ready' | 'restarting' | 'down') => void) | undefined;
+  onStateChangeMock.mockImplementation(async (cb) => {
+    emit = cb;
+    return () => {};
+  });
+
+  render(<EngineStatus />);
+  expect(screen.getByText(/connecting/i)).toBeDefined();
+
+  await act(async () => {
+    emit?.('restarting');
+  });
+  expect(screen.getByText(/restarting/i)).toBeDefined();
+
+  // The now-stale rejection arrives after the restart. It must not
+  // overwrite the restarting view with an error for an engine incarnation
+  // nothing is waiting on anymore.
+  await act(async () => {
+    rejectFirstHandshake?.({ code: EngineErrorCode.Unavailable, message: 'boom' });
+  });
+
+  expect(screen.getByText(/restarting/i)).toBeDefined();
+  expect(screen.queryByText(/^Engine error:/)).toBeNull();
+});
+
+it('unregisters the state-change listener if the component unmounts before onStateChange resolves', async () => {
+  healthMock.mockResolvedValue({
+    status: 'ok',
+    version: '1.2.3',
+    commit: 'abc123',
+    pid: 4242,
+  });
+
+  let resolveOnStateChange: ((fn: () => void) => void) | undefined;
+  onStateChangeMock.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveOnStateChange = resolve;
+      }),
+  );
+
+  const { unmount } = render(<EngineStatus />);
+  // Unmount while onStateChange's promise is still pending, before an
+  // unlisten function exists to call.
+  unmount();
+
+  const unlistenSpy = vi.fn();
+  await act(async () => {
+    resolveOnStateChange?.(unlistenSpy);
+  });
+
+  // A subscription that resolves after unmount must be torn down
+  // immediately rather than stored, or it would leak: nothing is left to
+  // ever call unlisten() on it otherwise.
+  expect(unlistenSpy).toHaveBeenCalledTimes(1);
+});

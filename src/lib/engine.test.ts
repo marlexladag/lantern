@@ -130,6 +130,7 @@ describe('health', () => {
     });
     expect(info.status).toBe('ok');
     expect(info.version).toBe('1.2.3');
+    expect(info.commit).toBe('abc123');
     expect(info.pid).toBe(4242);
   });
 });
