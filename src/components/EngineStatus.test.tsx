@@ -1,12 +1,19 @@
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 
-vi.mock('../lib/engine', () => ({
-  health: vi.fn(),
-  onStateChange: vi.fn(),
-}));
+vi.mock('../lib/engine', async () => {
+  // toEngineError and EngineErrorCode are pure helpers with no Tauri
+  // dependency, so the component gets the real ones; only the two functions
+  // that cross the IPC boundary are stubbed.
+  const actual = await vi.importActual<typeof import('../lib/engine')>('../lib/engine');
+  return {
+    ...actual,
+    health: vi.fn(),
+    onStateChange: vi.fn(),
+  };
+});
 
-import { health, onStateChange, type Health } from '../lib/engine';
+import { health, onStateChange, EngineErrorCode, type Health } from '../lib/engine';
 import { EngineStatus } from './EngineStatus';
 
 const healthMock = vi.mocked(health);
@@ -49,16 +56,33 @@ it('shows the engine version and pid after a successful handshake', async () => 
   expect(healthMock).toHaveBeenCalledWith();
 });
 
-it('shows the error message when the handshake fails', async () => {
-  healthMock.mockRejectedValue('engine is not running');
+it('shows the message and the code when the handshake fails', async () => {
+  healthMock.mockRejectedValue({
+    code: EngineErrorCode.Unavailable,
+    message: 'cannot resolve sidecar: program not found',
+  });
 
   render(<EngineStatus />);
 
   await waitFor(() => {
-    expect(screen.getByText(/engine is not running/i)).toBeDefined();
+    expect(screen.getByText(/cannot resolve sidecar/i)).toBeDefined();
   });
+  // The code is what a future Kind branch will key on, so it has to survive
+  // all the way to the rendered output, not just the type.
+  expect(screen.getByText(/-32000/)).toBeDefined();
   expect(healthMock).toHaveBeenCalledTimes(1);
   expect(healthMock).toHaveBeenCalledWith();
+});
+
+it('still renders a readable error when something throws a bare string', async () => {
+  healthMock.mockRejectedValue('something went sideways');
+
+  render(<EngineStatus />);
+
+  await waitFor(() => {
+    expect(screen.getByText(/something went sideways/i)).toBeDefined();
+  });
+  expect(screen.getByText(new RegExp(String(EngineErrorCode.Ipc)))).toBeDefined();
 });
 
 it('reports a restart and re-runs the handshake when the engine recovers', async () => {

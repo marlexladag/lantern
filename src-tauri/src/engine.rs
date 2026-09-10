@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
@@ -41,6 +42,86 @@ const MIN_HEALTHY_UPTIME: Duration = Duration::from_secs(2);
 /// assuming the app is broken and needing an explicit "down" signal instead.
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 
+/// Codes for failures that originate in the shell, before or instead of a
+/// reply from the engine. JSON-RPC 2.0 reserves -32000..=-32099 for
+/// implementation-defined server errors; these are ours, and they never
+/// collide with a code the engine itself can produce.
+///
+/// They are deliberately five distinct values rather than one catch-all.
+/// Section 11 of the spec requires every error to normalize to a `Kind`
+/// (Auth, Network, Syntax, Constraint, Timeout, Canceled, Unknown) that the
+/// UI branches on, and a classifier cannot recover "the engine is not
+/// running" (retryable, closer to Network) from "the request timed out"
+/// (Timeout) once both have been flattened into prose. Keep them distinct.
+pub mod code {
+    /// No child process to write to: it never started, or it died and the
+    /// supervisor has not replaced it yet.
+    pub const ENGINE_UNAVAILABLE: i64 = -32000;
+    /// The child exists but the write to its stdin failed.
+    pub const TRANSPORT: i64 = -32001;
+    /// The child died with this request still in flight.
+    pub const ENGINE_DIED: i64 = -32002;
+    /// No reply within REQUEST_TIMEOUT.
+    pub const TIMEOUT: i64 = -32003;
+    /// The request could not be serialized, or the reply could not be
+    /// understood as a JSON-RPC response.
+    pub const MALFORMED: i64 = -32004;
+}
+
+/// One error, carried across the Rust -> TypeScript seam with its structure
+/// intact.
+///
+/// The engine already produces a structured JSON-RPC error (see
+/// `internal/rpc/server.go`, which maps handler errors to a code). Flattening
+/// that to a string here is lossy in a way that cannot be undone downstream:
+/// Section 11 of the spec has the UI branching on a `Kind`, and `Canceled`
+/// specifically must not paint the screen red - a bare string has nowhere to
+/// put that. This type is the shape with room for it.
+///
+/// Deliberately NOT here yet: `Kind` classification, `Native` driver text,
+/// and any redaction policy. Those belong with the driver work that first
+/// creates something to classify; inventing them now would mean guessing at
+/// the categories real drivers produce.
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineError {
+    /// JSON-RPC code: the engine's own for a reply it produced, or one of
+    /// the `code` constants above for a failure in the shell.
+    pub code: i64,
+    /// Human-readable summary. Safe to show; not safe to parse.
+    pub message: String,
+    /// The JSON-RPC `data` member, passed through untouched when the engine
+    /// sends one. This is where a driver's structured detail will arrive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl EngineError {
+    fn new(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// Reads a JSON-RPC `error` member into this type, keeping `code` and
+    /// `data` rather than discarding them.
+    fn from_wire(err: &Value) -> Self {
+        Self {
+            code: err
+                .get("code")
+                .and_then(Value::as_i64)
+                .unwrap_or(code::MALFORMED),
+            message: err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown engine error")
+                .to_string(),
+            data: err.get("data").cloned(),
+        }
+    }
+}
+
 /// Bookkeeping for the respawn backoff, updated together under one lock so
 /// "how long was it up" and "how many times in a row has that failed" never
 /// drift out of sync with each other.
@@ -60,6 +141,12 @@ pub struct Engine {
     /// `handle_death` and `spawn` so a deliberate shutdown never races a
     /// replacement engine into existence during teardown.
     shutting_down: AtomicBool,
+    /// Why the engine is not running, when it isn't. Without this the UI's
+    /// only diagnostic for a failed start is "engine is not running", and
+    /// the actual reason - a missing, corrupt, or wrong-architecture sidecar
+    /// in a fresh install - reaches nothing but stderr, which a Windows
+    /// release build (windows_subsystem = "windows") does not even have.
+    last_failure: Mutex<Option<String>>,
 }
 
 impl Engine {
@@ -71,6 +158,7 @@ impl Engine {
             child: Mutex::new(None),
             restart: Mutex::new(RestartTracker::default()),
             shutting_down: AtomicBool::new(false),
+            last_failure: Mutex::new(None),
         })
     }
 
@@ -83,10 +171,20 @@ impl Engine {
     fn fail_all_pending(&self, reason: &str) {
         let mut pending = self.pending.lock().unwrap();
         for (_, tx) in pending.drain() {
+            // Shaped like a JSON-RPC error reply so `request` has exactly
+            // one place that turns a wire error into an EngineError.
             let _ = tx.send(serde_json::json!({
-                "error": { "code": -32603, "message": reason }
+                "error": { "code": code::ENGINE_DIED, "message": reason }
             }));
         }
+    }
+
+    /// Records why the engine is unavailable and tells the UI. Used for a
+    /// failure that leaves no child process behind to retry with.
+    pub fn mark_down(&self, reason: String) {
+        eprintln!("engine: {reason}");
+        *self.last_failure.lock().unwrap() = Some(reason);
+        self.set_state("down");
     }
 
     /// Marks the engine as intentionally stopping and kills the child
@@ -134,6 +232,7 @@ impl Engine {
             .map_err(|e| format!("cannot spawn sidecar: {e}"))?;
 
         *self.child.lock().unwrap() = Some(child);
+        *self.last_failure.lock().unwrap() = None;
         self.restart.lock().unwrap().spawned_at = Some(Instant::now());
         // NOTE for whoever wires up connection/status UI later: on this
         // *first* call - from setup(), before the webview's JS bundle has
@@ -243,10 +342,9 @@ impl Engine {
         };
 
         if attempt > MAX_RESTART_ATTEMPTS {
-            eprintln!(
-                "engine: {attempt} consecutive failed starts, giving up (last attempt did not stay up {MIN_HEALTHY_UPTIME:?})"
-            );
-            self.set_state("down");
+            self.mark_down(format!(
+                "{attempt} consecutive failed starts, giving up (last attempt did not stay up {MIN_HEALTHY_UPTIME:?})"
+            ));
             return;
         }
 
@@ -267,14 +365,21 @@ impl Engine {
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(delay).await;
             if let Err(e) = this.spawn() {
-                eprintln!("engine: restart failed: {e}");
-                this.set_state("down");
+                this.mark_down(format!("restart failed: {e}"));
             }
         });
     }
 
     /// Sends one request and awaits its response.
-    pub async fn request(&self, method: String, params: Option<Value>) -> Result<Value, String> {
+    ///
+    /// Every failure - including the ones that never reach the engine -
+    /// comes back as an `EngineError` carrying a code, so the caller never
+    /// has to parse prose to find out what happened.
+    pub async fn request(
+        &self,
+        method: String,
+        params: Option<Value>,
+    ) -> Result<Value, EngineError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
@@ -287,7 +392,9 @@ impl Engine {
             message["params"] = p;
         }
 
-        let mut line = serde_json::to_vec(&message).map_err(|e| e.to_string())?;
+        let mut line = serde_json::to_vec(&message).map_err(|e| {
+            EngineError::new(code::MALFORMED, format!("cannot encode request: {e}"))
+        })?;
         line.push(b'\n');
 
         // Register before writing, so a fast response cannot arrive first.
@@ -302,11 +409,24 @@ impl Engine {
             let mut guard = self.child.lock().unwrap();
             let child = guard.as_mut().ok_or_else(|| {
                 self.pending.lock().unwrap().remove(&id);
-                "engine is not running".to_string()
+                // Prefer the recorded reason the engine is not running (a
+                // sidecar that could not be resolved or spawned) over the
+                // generic symptom. On a fresh install that reason IS the
+                // bug report, and stderr may be going nowhere.
+                let reason = self
+                    .last_failure
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "engine is not running".to_string());
+                EngineError::new(code::ENGINE_UNAVAILABLE, reason)
             })?;
             if let Err(e) = child.write(&line) {
                 self.pending.lock().unwrap().remove(&id);
-                return Err(format!("cannot write to engine: {e}"));
+                return Err(EngineError::new(
+                    code::TRANSPORT,
+                    format!("cannot write to engine: {e}"),
+                ));
             }
         }
 
@@ -321,20 +441,19 @@ impl Engine {
                 // the entry is already gone, and correct if some future
                 // code path ever drops a sender without a send.
                 self.pending.lock().unwrap().remove(&id);
-                return Err("engine died before responding".into());
+                return Err(EngineError::new(
+                    code::ENGINE_DIED,
+                    "engine died before responding",
+                ));
             }
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
-                return Err("engine timed out".into());
+                return Err(EngineError::new(code::TIMEOUT, "engine timed out"));
             }
         };
 
         if let Some(err) = response.get("error") {
-            let message = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown engine error");
-            return Err(message.to_string());
+            return Err(EngineError::from_wire(err));
         }
 
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
@@ -346,6 +465,83 @@ pub async fn engine_request(
     engine: tauri::State<'_, Arc<Engine>>,
     method: String,
     params: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, EngineError> {
     engine.request(method, params).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The seam's whole purpose: a JSON-RPC error arrives as structure and
+    // leaves as structure. If this ever flattens to a message again, the
+    // `Kind` branch that spec section 11 requires has nowhere to read from.
+    #[test]
+    fn from_wire_keeps_code_message_and_data() {
+        let err = serde_json::json!({
+            "code": -32601,
+            "message": "unknown method: query",
+            "data": { "method": "query" },
+        });
+
+        let parsed = EngineError::from_wire(&err);
+
+        assert_eq!(parsed.code, -32601);
+        assert_eq!(parsed.message, "unknown method: query");
+        assert_eq!(parsed.data, Some(serde_json::json!({ "method": "query" })));
+    }
+
+    #[test]
+    fn from_wire_omits_absent_data() {
+        let err = serde_json::json!({ "code": -32603, "message": "internal error" });
+
+        let parsed = EngineError::from_wire(&err);
+
+        assert_eq!(parsed.code, -32603);
+        assert!(parsed.data.is_none());
+        // `data` is skipped entirely rather than serialized as null, so the
+        // TypeScript side sees an absent optional field.
+        let json = serde_json::to_value(&parsed).unwrap();
+        assert!(json.get("data").is_none());
+    }
+
+    // A reply we cannot read is itself an error, and it needs a code of its
+    // own rather than borrowing a real one - otherwise a malformed frame is
+    // indistinguishable from a genuine engine failure.
+    #[test]
+    fn from_wire_falls_back_when_the_error_object_is_unusable() {
+        let parsed = EngineError::from_wire(&serde_json::json!({ "nonsense": true }));
+
+        assert_eq!(parsed.code, code::MALFORMED);
+        assert_eq!(parsed.message, "unknown engine error");
+        assert!(parsed.data.is_none());
+    }
+
+    // The shell's own codes must never collide with the JSON-RPC reserved
+    // range the engine draws from (-32700..=-32600), or a Kind classifier
+    // would map a transport failure onto a protocol failure.
+    #[test]
+    fn shell_codes_are_distinct_and_inside_the_implementation_defined_range() {
+        let codes = [
+            code::ENGINE_UNAVAILABLE,
+            code::TRANSPORT,
+            code::ENGINE_DIED,
+            code::TIMEOUT,
+            code::MALFORMED,
+        ];
+        for c in codes {
+            assert!(
+                (-32099..=-32000).contains(&c),
+                "{c} is outside the JSON-RPC implementation-defined server error range"
+            );
+        }
+        let mut unique = codes.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "shell error codes must be unique"
+        );
+    }
 }

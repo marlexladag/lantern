@@ -5,7 +5,14 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { request, health, onStateChange } from './engine';
+import {
+  request,
+  health,
+  onStateChange,
+  isEngineError,
+  toEngineError,
+  EngineErrorCode,
+} from './engine';
 
 const invokeMock = vi.mocked(invoke);
 const listenMock = vi.mocked(listen);
@@ -39,10 +46,70 @@ describe('request', () => {
     });
   });
 
-  it('propagates engine errors to the caller', async () => {
-    invokeMock.mockRejectedValue('engine is not running');
+  it('rejects with the structured error the shell sent, code and data intact', async () => {
+    invokeMock.mockRejectedValue({
+      code: -32601,
+      message: 'unknown method: query',
+      data: { method: 'query' },
+    });
 
-    await expect(request('health')).rejects.toBe('engine is not running');
+    // The whole point of the seam: `code` and `data` survive the trip. A
+    // bare string would have nowhere to put the `Kind` that spec §11 needs.
+    await expect(request('query')).rejects.toEqual({
+      code: -32601,
+      message: 'unknown method: query',
+      data: { method: 'query' },
+    });
+  });
+
+  it('rejects with a shell code when the engine is not running', async () => {
+    invokeMock.mockRejectedValue({
+      code: EngineErrorCode.Unavailable,
+      message: 'cannot resolve sidecar: program not found',
+    });
+
+    await expect(request('health')).rejects.toMatchObject({
+      code: EngineErrorCode.Unavailable,
+    });
+  });
+
+  it('wraps a bare IPC-layer rejection so callers always get an EngineError', async () => {
+    // Tauri itself can reject with a plain string (unknown command, bad
+    // argument deserialization). That never reached our seam, so it has no
+    // code of its own — give it one rather than leaking a raw string.
+    invokeMock.mockRejectedValue('command engine_request not found');
+
+    await expect(request('health')).rejects.toEqual({
+      code: EngineErrorCode.Ipc,
+      message: 'command engine_request not found',
+      data: 'command engine_request not found',
+    });
+  });
+});
+
+describe('isEngineError / toEngineError', () => {
+  it('recognizes a structured error', () => {
+    expect(isEngineError({ code: -32603, message: 'boom' })).toBe(true);
+  });
+
+  it('rejects values that are missing the structure', () => {
+    expect(isEngineError('boom')).toBe(false);
+    expect(isEngineError(null)).toBe(false);
+    expect(isEngineError({ message: 'boom' })).toBe(false);
+    expect(isEngineError({ code: -1 })).toBe(false);
+  });
+
+  it('passes a structured error through untouched', () => {
+    const err = { code: -32000, message: 'engine is not running' };
+    expect(toEngineError(err)).toBe(err);
+  });
+
+  it('wraps a non-Error throw with a readable message', () => {
+    expect(toEngineError(new Error('kaboom'))).toEqual({
+      code: EngineErrorCode.Ipc,
+      message: 'Error: kaboom',
+      data: new Error('kaboom'),
+    });
   });
 });
 

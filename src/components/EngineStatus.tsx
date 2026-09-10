@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { health, onStateChange, type EngineState, type Health } from '../lib/engine';
+import {
+  health,
+  onStateChange,
+  toEngineError,
+  type EngineError,
+  type EngineState,
+  type Health,
+} from '../lib/engine';
 
 type View =
   | { kind: 'connecting' }
   | { kind: 'ready'; info: Health }
   | { kind: 'restarting' }
   | { kind: 'down' }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; error: EngineError };
 
 export function EngineStatus() {
   const [view, setView] = useState<View>({ kind: 'connecting' });
@@ -27,7 +34,10 @@ export function EngineStatus() {
       const info = await health();
       if (gen === generation.current) setView({ kind: 'ready', info });
     } catch (err) {
-      if (gen === generation.current) setView({ kind: 'error', message: String(err) });
+      // request() already guarantees an EngineError; normalizing again is
+      // cheap and keeps this component correct if some other throw ever
+      // reaches here.
+      if (gen === generation.current) setView({ kind: 'error', error: toEngineError(err) });
     }
   }, []);
 
@@ -74,7 +84,15 @@ export function EngineStatus() {
         </p>
       );
     case 'error':
-      return <p role="alert">Engine error: {view.message}</p>;
+      // Where Section 11's `Kind` branch will go: today every error renders
+      // the same way, but `Canceled` must NOT paint an alert once queries
+      // can be stopped. Branch on view.error.code (or the Kind that will
+      // sit beside it) here rather than adding a second error path.
+      return (
+        <p role="alert">
+          Engine error: {view.error.message} (code {view.error.code})
+        </p>
+      );
     case 'ready':
       return (
         <p>
