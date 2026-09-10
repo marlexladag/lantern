@@ -28,13 +28,19 @@ if [[ ! -f "$WORKFLOW_FILE" ]]; then
 fi
 pass "Workflow file exists"
 
-# Check 2: YAML is valid
-if ! python3 -c "import yaml,sys; yaml.safe_load(open('$WORKFLOW_FILE'))" 2>&1; then
+# Check 2: YAML is valid and PyYAML is available
+if ! python3 -c "import yaml" 2>/dev/null; then
+    fail "PyYAML not available. Install with: python3 -m pip install PyYAML"
+fi
+
+if ! python3 -c "import yaml; yaml.safe_load(open('$WORKFLOW_FILE'))" 2>&1; then
     fail "Workflow YAML parsing failed"
 fi
 pass "Workflow YAML parses correctly"
 
 # Check 3: Extract and verify all shell scripts referenced
+# Note: Only detects scripts with ./ prefix (e.g., ./scripts/foo.sh).
+# Does not detect bash scripts/foo.sh or other forms.
 echo
 echo "Checking shell scripts..."
 SCRIPTS=$(python3 -c "
@@ -93,14 +99,12 @@ for job_name, job in workflow.get('jobs', {}).items():
             # Extract npm run/test commands
             for match in re.finditer(r'npm\s+(run\s+)?(\S+)', run_cmd):
                 # If 'run' is captured in group 1, then script is in group 2
-                # Otherwise it's a built-in command like 'ci' or 'test'
+                # Otherwise it's a built-in command or package.json script
+                script_name = match.group(2)
                 if match.group(1):  # 'npm run X'
-                    scripts.add(match.group(2))
-                elif match.group(2) in ['test', 'ci']:
-                    # These are built-in, but we still want to verify
-                    scripts.add(match.group(2))
-                else:
-                    scripts.add(match.group(2))
+                    scripts.add(script_name)
+                else:  # 'npm X'
+                    scripts.add(script_name)
 
 for script in sorted(scripts):
     print(script)
@@ -124,13 +128,16 @@ for script in sorted(scripts.keys()):
     print(script)
 ")
 
+# npm built-in commands that don't require package.json entries
+NPM_BUILTINS="ci install audit dedupe diff exec pkg pack publish run start stop test uninstall update view"
+
 if [[ -z "$NPM_SCRIPTS" ]]; then
     pass "No npm scripts referenced in workflow"
 else
     while IFS= read -r script; do
-        # 'ci' is a built-in npm command, not a package.json script
-        if [[ "$script" == "ci" ]]; then
-            echo "  ✓ npm ci (built-in)"
+        # Check if it's a built-in npm command
+        if echo " $NPM_BUILTINS " | grep -q " $script "; then
+            echo "  ✓ npm $script (built-in)"
             continue
         fi
 
@@ -142,68 +149,144 @@ else
     pass "All npm scripts are defined in package.json"
 fi
 
-# Check 5: Go version compatibility
+# Check 5: Go version compatibility across all setup-go steps
 echo
 echo "Checking Go version compatibility..."
-GO_VERSION_WORKFLOW=$(python3 -c "
+GO_MOD_FILE="$REPO_ROOT/go.mod"
+GO_VERSION_MOD=""
+if [[ -f "$GO_MOD_FILE" ]]; then
+    GO_VERSION_MOD=$(grep '^go ' "$GO_MOD_FILE" | awk '{print $2}')
+fi
+
+# Collect ALL setup-go steps from all jobs
+GO_VERSIONS=$(python3 -c "
 import yaml
 import sys
 
 with open('$WORKFLOW_FILE') as f:
     workflow = yaml.safe_load(f)
 
-# Find setup-go step and extract version
-for job in workflow.get('jobs', {}).values():
-    for step in job.get('steps', []):
+# For each job, find all setup-go steps
+for job_name, job in workflow.get('jobs', {}).items():
+    for step_idx, step in enumerate(job.get('steps', [])):
         if step.get('uses', '').startswith('actions/setup-go'):
             with_config = step.get('with', {})
+            # Check for different ways to specify Go version
             if 'go-version' in with_config:
-                print(with_config['go-version'].lstrip('v'))
-                sys.exit(0)
+                version = with_config['go-version'].lstrip('v')
+                print(f'{job_name}:{step_idx}:version:{version}')
+            elif 'go-version-file' in with_config:
+                # go-version-file is a valid alternative
+                file_path = with_config['go-version-file']
+                print(f'{job_name}:{step_idx}:go-version-file:{file_path}')
+            else:
+                # No recognized version specification found
+                print(f'{job_name}:{step_idx}:UNKNOWN')
 ")
 
-GO_MOD_FILE="$REPO_ROOT/go.mod"
-if [[ -f "$GO_MOD_FILE" ]]; then
-    GO_VERSION_MOD=$(grep '^go ' "$GO_MOD_FILE" | awk '{print $2}')
-
-    # Compare versions (simple numeric comparison for X.Y format)
-    if [[ -n "$GO_VERSION_WORKFLOW" ]] && [[ -n "$GO_VERSION_MOD" ]]; then
-        WF_MAJOR=$(echo "$GO_VERSION_WORKFLOW" | cut -d. -f1)
-        WF_MINOR=$(echo "$GO_VERSION_WORKFLOW" | cut -d. -f2)
-        MOD_MAJOR=$(echo "$GO_VERSION_MOD" | cut -d. -f1)
-        MOD_MINOR=$(echo "$GO_VERSION_MOD" | cut -d. -f2)
-
-        WF_NUM=$((WF_MAJOR * 1000 + WF_MINOR))
-        MOD_NUM=$((MOD_MAJOR * 1000 + MOD_MINOR))
-
-        if [[ $WF_NUM -lt $MOD_NUM ]]; then
-            fail "Go version in workflow ($GO_VERSION_WORKFLOW) is older than go.mod requires ($GO_VERSION_MOD)"
-        fi
-        pass "Go version compatibility: workflow=$GO_VERSION_WORKFLOW, go.mod=$GO_VERSION_MOD"
-    fi
+if [[ -z "$GO_VERSIONS" ]]; then
+    echo "  (No setup-go steps found; skipping Go version check)"
 else
-    echo "  (go.mod not found, skipping Go version check)"
-fi
+    # Track if we found any Go version to verify
+    FOUND_ANY_VERSION=false
+    GO_CHECK_FAILED=false
 
-# Check 6: Verify referenced source directories exist
-echo
-echo "Checking referenced source directories..."
-# For now, just verify that src-tauri directory exists (where Cargo.lock should be)
-SOURCE_PATHS="src-tauri"
+    while IFS=':' read -r job_name step_idx version_type version_value; do
+        if [[ "$version_type" == "version" ]]; then
+            FOUND_ANY_VERSION=true
 
-MISSING_PATHS=""
-for path in $SOURCE_PATHS; do
-    if [[ ! -d "$REPO_ROOT/$path" ]]; then
-        MISSING_PATHS="$MISSING_PATHS $path"
-    else
-        echo "  ✓ $path (exists)"
+            if [[ -n "$GO_VERSION_MOD" ]]; then
+                # Compare versions (simple numeric comparison for X.Y format)
+                WF_MAJOR=$(echo "$version_value" | cut -d. -f1)
+                WF_MINOR=$(echo "$version_value" | cut -d. -f2)
+                MOD_MAJOR=$(echo "$GO_VERSION_MOD" | cut -d. -f1)
+                MOD_MINOR=$(echo "$GO_VERSION_MOD" | cut -d. -f2)
+
+                WF_NUM=$((WF_MAJOR * 1000 + WF_MINOR))
+                MOD_NUM=$((MOD_MAJOR * 1000 + MOD_MINOR))
+
+                if [[ $WF_NUM -lt $MOD_NUM ]]; then
+                    fail "Go version in job '$job_name' step $step_idx ($version_value) is older than go.mod requires ($GO_VERSION_MOD)"
+                fi
+                echo "  ✓ $job_name: Go $version_value (matches go.mod requirement)"
+            else
+                echo "  ✓ $job_name: Go $version_value (go.mod not found to verify)"
+            fi
+        elif [[ "$version_type" == "go-version-file" ]]; then
+            echo "  ✓ $job_name: step $step_idx uses go-version-file ($version_value) — cannot verify without reading file"
+        elif [[ "$version_type" == "UNKNOWN" ]]; then
+            fail "setup-go step in job '$job_name' (step $step_idx) does not specify go-version or go-version-file. Cannot determine Go version requirement."
+        fi
+    done <<< "$GO_VERSIONS"
+
+    if [[ "$FOUND_ANY_VERSION" == true ]]; then
+        pass "Go version compatibility verified"
     fi
-done
-
-if [[ -n "$MISSING_PATHS" ]]; then
-    fail "Referenced source directories do not exist:$MISSING_PATHS"
 fi
-pass "All referenced source directories exist"
+
+# Check 6: Verify paths referenced in the workflow
+echo
+echo "Checking paths referenced in workflow..."
+PATHS=$(python3 -c '
+import yaml
+import re
+
+with open("'"$WORKFLOW_FILE"'") as f:
+    workflow = yaml.safe_load(f)
+
+paths = set()
+
+# Extract paths from hashFiles() calls
+for job in workflow.get("jobs", {}).values():
+    for step in job.get("steps", []):
+        for key, value in step.items():
+            if isinstance(value, str):
+                # hashFiles with single or double quotes
+                for match in re.finditer(r"hashFiles\(['\''\"](.*?)['\''\"]\)", value):
+                    path = match.group(1)
+                    base = path.split("/**")[0]
+                    if base:
+                        paths.add(base)
+            elif isinstance(value, dict):
+                for subkey, subvalue in value.items():
+                    if isinstance(subvalue, str):
+                        for match in re.finditer(r"hashFiles\(['\''\"](.*?)['\''\"]\)", subvalue):
+                            path = match.group(1)
+                            base = path.split("/**")[0]
+                            if base:
+                                paths.add(base)
+
+# Extract paths from working-directory keys
+for job in workflow.get("jobs", {}).values():
+    for step in job.get("steps", []):
+        if "working-directory" in step:
+            wd = step["working-directory"]
+            if wd:
+                paths.add(wd)
+
+for path in sorted(paths):
+    print(path)
+')
+
+if [[ -z "$PATHS" ]]; then
+    pass "No static paths to verify in workflow"
+else
+    MISSING_PATHS=""
+    while IFS= read -r path; do
+        # Check if path exists as either file or directory
+        if [[ ! -e "$REPO_ROOT/$path" ]]; then
+            MISSING_PATHS="$MISSING_PATHS $path"
+        else
+            echo "  ✓ $path (exists)"
+        fi
+    done <<< "$PATHS"
+
+    if [[ -n "$MISSING_PATHS" ]]; then
+        fail "Referenced paths do not exist:$MISSING_PATHS"
+    else
+        pass "All referenced paths exist"
+    fi
+fi
 
 echo
 echo "=== All checks passed ==="

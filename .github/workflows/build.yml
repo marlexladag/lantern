@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate workflow
+        run: ./scripts/ci-workflow_test.sh
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
@@ -22,8 +24,6 @@ jobs:
         run: ./scripts/build-sidecars.sh
       - name: Verify sidecar naming contract
         run: ./scripts/build-sidecars_test.sh
-      - name: Validate workflow
-        run: ./scripts/ci-workflow_test.sh
 
   ui:
     name: ui tests
