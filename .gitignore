@@ -20,3 +20,4 @@ design/tablepluslike-interface.html
 
 # SDD execution scratch (ledger, briefs, review packages)
 .superpowers/
+src-tauri/binaries/
