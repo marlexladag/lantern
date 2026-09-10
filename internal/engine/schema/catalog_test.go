@@ -55,7 +55,7 @@ func TestJSONFieldNames(t *testing.T) {
 		Tables: []Table{{
 			Name:    "users",
 			Kind:    TableKindTable,
-			Columns: []Column{{Name: "id", DataType: "INTEGER", PrimaryKey: true, Position: 0}},
+			Columns: []Column{{Name: "id", DataType: "INTEGER", Nullable: true, PrimaryKey: true, Position: 0}},
 		}},
 	}}})
 	if err != nil {
@@ -71,7 +71,9 @@ func TestJSONFieldNames(t *testing.T) {
 				Columns []struct {
 					Name       string `json:"name"`
 					DataType   string `json:"data_type"`
+					Nullable   bool   `json:"nullable"`
 					PrimaryKey bool   `json:"primary_key"`
+					Position   int    `json:"position"`
 				} `json:"columns"`
 			} `json:"tables"`
 		} `json:"databases"`
@@ -79,11 +81,36 @@ func TestJSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if raw.Databases[0].Tables[0].Columns[0].DataType != "INTEGER" {
-		t.Errorf("data_type did not round trip: %s", b)
+
+	// Assert all Column tags
+	col := raw.Databases[0].Tables[0].Columns[0]
+	if col.Name != "id" {
+		t.Errorf("name did not round trip: want id, got %s", col.Name)
 	}
-	if !raw.Databases[0].Tables[0].Columns[0].PrimaryKey {
-		t.Errorf("primary_key did not round trip: %s", b)
+	if col.DataType != "INTEGER" {
+		t.Errorf("data_type did not round trip: want INTEGER, got %s", col.DataType)
+	}
+	if !col.Nullable {
+		t.Errorf("nullable did not round trip: want true, got false")
+	}
+	if !col.PrimaryKey {
+		t.Errorf("primary_key did not round trip: want true, got false")
+	}
+	if col.Position != 0 {
+		t.Errorf("position did not round trip: want 0, got %d", col.Position)
+	}
+
+	// Assert Database and Table tags
+	db := raw.Databases[0]
+	if db.Name != "main" {
+		t.Errorf("database name did not round trip: want main, got %s", db.Name)
+	}
+	tbl := raw.Databases[0].Tables[0]
+	if tbl.Name != "users" {
+		t.Errorf("table name did not round trip: want users, got %s", tbl.Name)
+	}
+	if tbl.Kind != "table" {
+		t.Errorf("table kind did not round trip: want table, got %s", tbl.Kind)
 	}
 }
 
@@ -100,5 +127,51 @@ func TestUnreadTableOmitsColumns(t *testing.T) {
 	}
 	if _, ok := raw["columns"]; ok {
 		t.Errorf("columns present for an unread table: %s", b)
+	}
+}
+
+// Database.Table returns a pointer into the slice, not a copy. Later tasks
+// will mutate this pointer to fill in columns. Verify that mutations are
+// visible when re-looking-up from the original Catalog.
+func TestTableLookupReturnsPointerToSliceEntry(t *testing.T) {
+	cat := &Catalog{Databases: []Database{{
+		Name:   "main",
+		Tables: []Table{{Name: "users", Kind: TableKindTable}},
+	}}}
+
+	db, _ := cat.Database("main")
+	tbl, _ := db.Table("users")
+
+	// Mutate through the returned pointer.
+	tbl.Columns = []Column{{Name: "id", DataType: "INTEGER", Position: 0}}
+
+	// Re-lookup from the original catalog and verify the mutation is visible.
+	db2, _ := cat.Database("main")
+	tbl2, _ := db2.Table("users")
+	if tbl2.Columns == nil {
+		t.Error("mutation through returned pointer was not visible in re-lookup")
+	}
+	if len(tbl2.Columns) != 1 || tbl2.Columns[0].Name != "id" {
+		t.Errorf("re-lookup did not see mutated columns: %+v", tbl2.Columns)
+	}
+}
+
+// Catalog.Database returns a pointer into the slice, not a copy. Verify that
+// mutations are visible when re-looking-up from the original Catalog.
+func TestDatabaseLookupReturnsPointerToSliceEntry(t *testing.T) {
+	cat := &Catalog{Databases: []Database{{
+		Name:   "main",
+		Tables: []Table{},
+	}}}
+
+	db, _ := cat.Database("main")
+
+	// Mutate through the returned pointer.
+	db.Tables = []Table{{Name: "users", Kind: TableKindTable}}
+
+	// Re-lookup from the original catalog and verify the mutation is visible.
+	db2, _ := cat.Database("main")
+	if len(db2.Tables) != 1 || db2.Tables[0].Name != "users" {
+		t.Errorf("mutation through returned pointer was not visible in re-lookup: %+v", db2.Tables)
 	}
 }
