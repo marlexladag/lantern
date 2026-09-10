@@ -31,7 +31,7 @@ A tunnel later becomes a dialer swap, not a redesign.
 
 | Layer | Choice |
 |---|---|
-| Engine | Go 1.23+, standalone process |
+| Engine | Go 1.24+, standalone process |
 | Shell | Tauri v2 |
 | UI | React 18 + TypeScript + Vite |
 | Result grid | Glide Data Grid (canvas-rendered) |

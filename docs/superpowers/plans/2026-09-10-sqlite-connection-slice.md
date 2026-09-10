@@ -6,7 +6,7 @@
 
 **Architecture:** A `Driver`/`Conn` abstraction in `internal/engine/driver` with SQLite as its first implementation, a normalized schema catalog every future engine maps onto, a connection store that keeps config in a JSON file and secrets in the OS keychain, and RPC methods exposing all of it through the existing JSON-RPC sidecar. The UI reuses the connection dialog and sidebar already specified in `design/`.
 
-**Tech Stack:** Go 1.23 (stdlib + `modernc.org/sqlite` + `zalando/go-keyring`), the existing `internal/rpc` sidecar, React 18 + TypeScript.
+**Tech Stack:** Go 1.24 (stdlib + `modernc.org/sqlite` + `zalando/go-keyring`), the existing `internal/rpc` sidecar, React 18 + TypeScript.
 
 **Spec:** `docs/superpowers/specs/2026-09-08-tableplus-like-client-design.md` — sections 4 (driver interface), 5 (schema model), 6 (connection storage and secrets), 11 (error model), 12 (design language).
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- Go 1.23 or later; the module's `go` directive is `go 1.23` — do not raise it.
+- Go 1.24 or later; the module's `go` directive is `go 1.24`. That floor is load-bearing, not arbitrary: `crypto/rand.Read`'s error-free guarantee (used by the connection store's ID generation) only holds from Go 1.24 (see `go.dev/issue/66821` and the Go 1.24 release notes). Do not lower it.
 - **`CGO_ENABLED=0` must keep working for all six targets.** This is why the SQLite driver is `modernc.org/sqlite` (pure Go) and not `mattn/go-sqlite3`. Never add a cgo dependency; `./scripts/build-sidecars_test.sh` will catch it.
 - **Exactly two new Go dependencies are permitted by this plan:** `modernc.org/sqlite` and `github.com/zalando/go-keyring`. Anything else needs a ruling.
 - **stdout carries the JSON-RPC protocol and nothing else.** Every log line and diagnostic goes to stderr. A single stray write corrupts the stream; a test guards this.

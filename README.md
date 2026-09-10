@@ -34,7 +34,7 @@ is the plumbing that everything else will sit on:
 
 ## Prerequisites
 
-- **Go** 1.23+ (the version in `go.mod`; the engine is standard library only)
+- **Go** 1.24+ (the version in `go.mod`; the engine is standard library only)
 - **Node** 20+
 - **Rust** stable, plus the
   [Tauri v2 system dependencies](https://tauri.app/start/prerequisites/) for

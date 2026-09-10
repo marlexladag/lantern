@@ -156,7 +156,30 @@ func (s *Store) Save(c Saved, password string) (Saved, error) {
 	}
 
 	secretStored := false
+	// priorKnown/priorExists/priorSecret capture whatever was filed under
+	// this id before Set below (possibly) overwrites it, so a config-write
+	// failure can restore exactly that state rather than blindly deleting
+	// whatever Set just wrote. On an update that changes the password, a
+	// blind delete would destroy the connection's still-valid existing
+	// secret, which is strictly worse than the drift this rollback exists
+	// to prevent.
+	var (
+		priorKnown  bool
+		priorExists bool
+		priorSecret string
+	)
 	if password != "" {
+		switch prior, err := s.keyring.Get(keyringService, c.ID); {
+		case err == nil:
+			priorKnown, priorExists, priorSecret = true, true, prior
+		case errors.Is(err, ErrSecretNotFound):
+			priorKnown, priorExists = true, false
+		default:
+			// Couldn't determine what, if anything, was there before —
+			// priorKnown stays false, and the rollback below leaves the
+			// keychain alone rather than guess.
+		}
+
 		if err := s.keyring.Set(keyringService, c.ID, password); err != nil {
 			return Saved{}, dberr.Wrap(dberr.KindUnknown, "cannot store the password in the keychain", err)
 		}
@@ -165,12 +188,26 @@ func (s *Store) Save(c Saved, password string) (Saved, error) {
 	if err := s.writeLocked(records); err != nil {
 		if secretStored {
 			// The keychain write already succeeded but the config write
-			// didn't, so without this the two stores would drift apart: a
-			// secret filed under an ID the config file never actually
-			// records. Best-effort clean it back up. Ignore any failure
-			// from this — we're already returning the original write
-			// error, and a failed rollback must not mask it.
-			_ = s.keyring.Delete(keyringService, c.ID)
+			// didn't, so without this the two stores would drift apart.
+			// Ignore any failure from the rollback itself — we're already
+			// returning the original write error, and a failed rollback
+			// must not mask it.
+			switch {
+			case priorKnown && priorExists:
+				// Restore the secret that was there before this Save call,
+				// so the keychain and config file end up agreeing in both
+				// directions (the update the user asked for didn't happen,
+				// so neither should the password change).
+				_ = s.keyring.Set(keyringService, c.ID, priorSecret)
+			case priorKnown && !priorExists:
+				// Nothing was filed under this id before — undo the Set by
+				// removing what it just wrote.
+				_ = s.keyring.Delete(keyringService, c.ID)
+			default:
+				// Couldn't prove what belonged there before Set ran.
+				// Losing a secret is worse than leaving an extra one
+				// behind, so leave the keychain exactly as Set left it.
+			}
 		}
 		return Saved{}, err
 	}

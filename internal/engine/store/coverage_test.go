@@ -324,6 +324,108 @@ func TestSaveKeepsTheOriginalErrorWhenTheRollbackDeleteAlsoFails(t *testing.T) {
 	}
 }
 
+// Coordinator-flagged Critical: the rollback above is correct for an insert
+// (nothing existed under this id before, so undoing the Set means deleting
+// it) but was destructive for an update — a blind delete would erase a
+// still-valid existing secret just because the *new* password's config
+// write failed. Save now reads whatever secret exists before Set overwrites
+// it, and restores exactly that value on a config-write failure, rather
+// than deleting unconditionally.
+func TestSaveRestoresThePriorSecretWhenAnUpdateWriteFails(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	kr := NewMemoryKeyring()
+	s := New(path, kr)
+
+	// Seed an existing connection with its original secret while the
+	// directory is still writable.
+	const id = "existing-connection-id"
+	const originalSecret = "original-secret"
+	seed := Saved{ID: id, Name: "prod", Driver: "mysql", User: "app"}
+	if _, err := s.Save(seed, originalSecret); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	// Now make the config directory unwritable and attempt an update that
+	// changes the password.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	updated := seed
+	updated.Name = "prod-renamed"
+	if _, err := s.Save(updated, "new-secret"); err == nil {
+		t.Fatal("Save succeeded despite an unwritable config directory")
+	}
+
+	got, err := kr.Get(keyringService, id)
+	if err != nil {
+		t.Fatalf("get after a failed update: %v", err)
+	}
+	if got != originalSecret {
+		t.Errorf("secret = %q, want the original %q to survive a failed update", got, originalSecret)
+	}
+}
+
+// When Save cannot even determine what, if anything, was filed under an id
+// before overwriting it, it must not guess: not deleting (which could
+// destroy a real secret it failed to read) and not restoring a value it
+// doesn't have. The rollback leaves the keychain exactly as the earlier
+// Set call left it.
+type flakyKeyring struct {
+	inner     Keyring
+	failFirst bool
+}
+
+func (k *flakyKeyring) Get(service, user string) (string, error) {
+	if k.failFirst {
+		k.failFirst = false
+		return "", errors.New("keychain temporarily unavailable")
+	}
+	return k.inner.Get(service, user)
+}
+
+func (k *flakyKeyring) Set(service, user, secret string) error {
+	return k.inner.Set(service, user, secret)
+}
+
+func (k *flakyKeyring) Delete(service, user string) error {
+	return k.inner.Delete(service, user)
+}
+
+func TestSaveLeavesTheKeyringAloneWhenThePriorSecretCannotBeDetermined(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	kr := &flakyKeyring{inner: NewMemoryKeyring(), failFirst: true}
+	s := New(path, kr)
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	const id = "flaky-lookup-id"
+	if _, err := s.Save(Saved{ID: id, Name: "x", Driver: "sqlite"}, "new-secret"); err == nil {
+		t.Fatal("Save succeeded despite an unwritable config directory")
+	}
+
+	// Bypass the flaky wrapper (its one scripted failure is already spent)
+	// to check the real, underlying state: whatever Set wrote must still be
+	// there, untouched by any rollback guess.
+	got, err := kr.inner.Get(keyringService, id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got != "new-secret" {
+		t.Errorf("secret = %q, want the value Set wrote left untouched", got)
+	}
+}
+
 // Self-review item: deleting a connection whose keychain entry is already
 // absent must succeed, not error — not every saved connection has a
 // password.
