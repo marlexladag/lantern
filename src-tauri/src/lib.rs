@@ -1,6 +1,8 @@
 mod engine;
 
-use tauri::Manager;
+use std::sync::Arc;
+
+use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,6 +15,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![engine::engine_request])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Belt-and-suspenders shutdown: dropping the child when this
+            // process exits already closes the sidecar's stdin, which it
+            // reads as its own clean-shutdown signal. This handler covers
+            // the case where that race goes the other way - see
+            // Engine::shutdown for why it's needed at all.
+            if let RunEvent::Exit = event {
+                app_handle.state::<Arc<engine::Engine>>().shutdown();
+            }
+        });
 }
