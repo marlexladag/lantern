@@ -15,10 +15,19 @@ import (
 type Kind string
 
 const (
-	KindAuth        Kind = "auth"
-	KindNetwork     Kind = "network"
-	KindSyntax      Kind = "syntax"
-	KindConstraint  Kind = "constraint"
+	KindAuth       Kind = "auth"
+	KindNetwork    Kind = "network"
+	KindSyntax     Kind = "syntax"
+	KindConstraint Kind = "constraint"
+	// KindReadOnly is a write rejected because the connection itself is
+	// read-only, distinct from KindConstraint: a constraint violation means
+	// "your data is bad" (it broke a UNIQUE/FK/CHECK rule and the fix is to
+	// change what you sent), read-only means "this connection refuses to
+	// write at all" (the fix is to reconnect read-write) — opposite user
+	// actions, so sharing a Kind would leave the UI unable to tell them
+	// apart. Not KindUnsupported either: the engine can perform the write;
+	// this particular connection just won't.
+	KindReadOnly    Kind = "read_only"
 	KindTimeout     Kind = "timeout"
 	KindCanceled    Kind = "canceled"
 	KindNotFound    Kind = "not_found"

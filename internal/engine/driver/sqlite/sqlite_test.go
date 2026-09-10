@@ -437,10 +437,16 @@ func TestClassifyNeverLetsNativeDriverTextReachMessage(t *testing.T) {
 // -- ReadOnly (A-3): the flag must actually be enforced, not merely drawn as
 // -- a lock icon in the sidebar ------------------------------------------
 
-// Coordinator-flagged: opens the same file twice, once with ReadOnly and
-// once without, and proves the difference by attempting the same write
-// against both — the only assertion that actually distinguishes "enforced"
-// from "accepted and ignored".
+// Coordinator-flagged (A2-1): opens the same file twice, once with ReadOnly
+// and once without, and proves the difference by attempting the same write
+// against both. It then goes one step further than "enforced, not ignored":
+// it also forces a genuine UNIQUE violation on the read-write connection and
+// requires that to still classify as Constraint. That second assertion is
+// the one that matters — SQLITE_READONLY and SQLITE_CONSTRAINT used to share
+// dberr.KindConstraint (wave A), which meant the UI could not tell "your
+// data is bad" (fix the row) from "this connection refuses to write" (untick
+// Production connection) apart. Both assertions failing to distinguish would
+// prove they are still conflated; both succeeding proves they are not.
 func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
 	path := fixture(t)
 
@@ -462,12 +468,8 @@ func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
 		t.Fatal("CREATE TABLE succeeded against a read-only connection")
 	}
 	got := dberr.From(err)
-	// Record which Kind a read-only rejection classifies as, and require it
-	// not to be Unknown — an unmapped result code reporting Unknown is
-	// indistinguishable from any other unclassified failure, which defeats
-	// the point of a normalized error model (spec section 11).
-	if got.Kind == dberr.KindUnknown {
-		t.Errorf("read-only rejection classified as %q, want a specific Kind, not Unknown", got.Kind)
+	if got.Kind != dberr.KindReadOnly {
+		t.Errorf("read-only rejection classified as %q, want %q", got.Kind, dberr.KindReadOnly)
 	}
 	t.Logf("read-only CREATE TABLE rejection classifies as Kind %q, Message %q", got.Kind, got.Message)
 
@@ -484,6 +486,20 @@ func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
 	db, _ := cat.Database("main")
 	if _, ok := db.Table("should_exist"); !ok {
 		t.Error("the read-write CREATE TABLE did not actually take effect")
+	}
+
+	// The adversarial half: a genuine constraint violation, on the
+	// read-write connection sitting right next to the read-only one above,
+	// must still classify as Constraint, not ReadOnly — proving the two
+	// Kinds were not accidentally merged back together while telling them
+	// apart above.
+	dupCur, err := rw.Query(context.Background(), "INSERT INTO users (id, email) VALUES (1, 'dup@example.com')")
+	if err == nil {
+		dupCur.Close()
+		t.Fatal("a duplicate primary key insert succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindConstraint {
+		t.Errorf("UNIQUE violation on a read-write connection classified as %q, want %q", got.Kind, dberr.KindConstraint)
 	}
 }
 

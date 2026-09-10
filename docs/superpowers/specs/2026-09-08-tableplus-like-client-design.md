@@ -267,7 +267,7 @@ Every driver error normalizes to:
 
 ```go
 type Error struct {
-    Kind    Kind   // Auth, Network, Syntax, Constraint, Timeout, Canceled, Unknown
+    Kind    Kind   // Auth, Network, Syntax, Constraint, ReadOnly, Timeout, Canceled, NotFound, Unsupported, Invalid, Unknown
     Message string // human-readable, engine-neutral
     Native  string // original driver text, shown on demand
     Query   string // the statement, when applicable

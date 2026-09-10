@@ -315,19 +315,25 @@ const (
 //	condition                                  Kind        Message
 //	result code SQLITE_CONSTRAINT              constraint  "the statement violates a constraint"
 //	result code SQLITE_CANTOPEN                not_found   "the database file could not be opened"
-//	result code SQLITE_READONLY                constraint  "the connection is read-only"
+//	result code SQLITE_READONLY                read_only   `the connection is read-only; untick "Production connection" to write to it`
 //	text has "syntax error" or "no such column" syntax     "the statement is not valid SQL"
 //	text has "no such table"                   not_found   "the table does not exist"
 //	otherwise                                  unknown     "the database reported an error"
 //
-// SQLITE_READONLY reports as Constraint rather than a dedicated Kind: like a
-// genuine constraint violation, it is a statement-level rejection that
-// leaves the database unchanged and is meaningful to retry elsewhere (a
-// read-write connection to the same file), which is a closer fit than
-// NotFound, Unsupported ("this engine can't do that" — untrue; this engine
-// can, this connection just won't) or Unknown. This mapping exists because
-// A-3's adversarial test proved SQLITE_READONLY landed in Unknown before it
-// was added — see TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds.
+// SQLITE_READONLY reports as dberr.KindReadOnly, a Kind of its own, rather
+// than Constraint: wave A shared Constraint between the two (see A-3 above),
+// but the controller overruled that — a genuine constraint violation means
+// "your data is bad" (fix the row) while a read-only rejection means "this
+// connection refuses to write at all" (reconnect read-write), and the UI
+// needs to tell those apart to point the user at the right fix. See
+// dberr.KindReadOnly's own doc comment for the full reasoning, and
+// TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds, which asserts
+// both Kinds on connections opened from the same fixture file so the two
+// cannot silently collapse back into one without the test failing. The
+// Message names the concrete next action (untick "Production connection",
+// the exact toggle in src/components/ConnectionDialog.tsx) rather than just
+// describing the failure, since "the statement failed" would leave the user
+// no more informed than Native already makes them.
 //
 // modernc.org/sqlite enables extended result codes on every connection it
 // opens (see its newConn) and exposes them through its own *sqlite.Error via
@@ -366,7 +372,7 @@ func classify(err error, stmt string) error {
 		case sqliteResultCantOpen:
 			kind, message = dberr.KindNotFound, "the database file could not be opened"
 		case sqliteResultReadOnly:
-			kind, message = dberr.KindConstraint, "the connection is read-only"
+			kind, message = dberr.KindReadOnly, `the connection is read-only; untick "Production connection" to write to it`
 		}
 	}
 
