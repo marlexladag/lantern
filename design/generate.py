@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates the .dc.html artboards for the tablepluslike design canvas.
+"""Generates the .dc.html artboards for the Lantern design canvas.
 
 Edit this file, re-run it, then re-seed the canvas. Hand-editing the
 generated .dc.html files works too but will be overwritten on the next run.
@@ -830,7 +830,7 @@ CANVAS = {
     ],
     "annotations": [
         {"id": "brief", "x": 0, "y": -190, "w": 620,
-         "text": "tablepluslike — UI/UX direction\n\nDense, calm, keyboard-first. Original "
+         "text": "Lantern — UI/UX direction\n\nDense, calm, keyboard-first. Original "
                  "visual language, not a copy of any shipping client.\n\nRow 1: the three screens "
                  "you live in. Row 2: entry points, states, and the tokens to build against."},
         {"id": "note-staged", "x": 1560, "y": -120, "w": 560,

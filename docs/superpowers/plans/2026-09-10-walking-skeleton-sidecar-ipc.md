@@ -19,7 +19,7 @@
 - JSON-RPC 2.0 framing, newline-delimited (one JSON object per line, no embedded raw newlines since JSON escapes them).
 - Six build targets: `{darwin,windows,linux} x {amd64,arm64}`.
 - Tauri sidecar binaries must be named `engine-<rust-target-triple>` to match Tauri's resolution convention.
-- Module path: `github.com/marlexladag/tablepluslike` (change once, in Task 1, if the repo lands elsewhere).
+- Module path: `github.com/marlexladag/lantern` (change once, in Task 1, if the repo lands elsewhere).
 - Every task ends with a commit.
 
 ---
@@ -86,7 +86,7 @@
 - [ ] **Step 1: Initialise the Go module**
 
 ```bash
-go mod init github.com/marlexladag/tablepluslike
+go mod init github.com/marlexladag/lantern
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -835,7 +835,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/marlexladag/tablepluslike/internal/rpc"
+	"github.com/marlexladag/lantern/internal/rpc"
 )
 
 // Info is the health method's result.
@@ -996,8 +996,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/marlexladag/tablepluslike/internal/health"
-	"github.com/marlexladag/tablepluslike/internal/rpc"
+	"github.com/marlexladag/lantern/internal/health"
+	"github.com/marlexladag/lantern/internal/rpc"
 )
 
 // Set at build time via -ldflags "-X main.version=... -X main.commit=...".
@@ -1879,7 +1879,7 @@ import { EngineStatus } from './components/EngineStatus';
 export default function App() {
   return (
     <main>
-      <h1>tablepluslike</h1>
+      <h1>Lantern</h1>
       <EngineStatus />
     </main>
   );

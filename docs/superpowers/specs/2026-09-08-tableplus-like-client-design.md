@@ -1,4 +1,4 @@
-# TablePlus-like Database Client — Design
+# Lantern — Database Client Design
 
 Date: 2026-09-08
 Status: Approved for planning
