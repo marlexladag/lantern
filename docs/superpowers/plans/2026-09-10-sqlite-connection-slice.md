@@ -389,7 +389,7 @@ func TestJSONFieldNames(t *testing.T) {
 			Kind:    TableKindTable,
 			Columns: []Column{{Name: "id", DataType: "INTEGER", PrimaryKey: true, Position: 0}},
 		}},
-	}})
+	}}})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
