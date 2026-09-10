@@ -49,11 +49,29 @@ func (s Saved) ConnConfig(password string) driver.ConnConfig {
 	}
 }
 
-// DefaultPath is where connections live on this machine.
+// configDirEnv, when set, overrides the directory DefaultPath resolves
+// connections.json under, in place of os.UserConfigDir. It exists so a
+// shell session experimenting with a real engine binary — piping JSON-RPC
+// at it by hand, the way this repo's own task reports do — can point it at
+// a scratch directory instead of risking whatever is already saved for the
+// real user. os.UserConfigDir alone is not a safe thing to rely on here: on
+// macOS it ignores XDG_CONFIG_HOME entirely and always resolves to
+// $HOME/Library/Application Support, so setting that variable does *not*
+// redirect it.
+const configDirEnv = "LANTERN_CONFIG_DIR"
+
+// DefaultPath is where connections live on this machine: LANTERN_CONFIG_DIR
+// if set (see configDirEnv), otherwise the OS-specific user config
+// directory from os.UserConfigDir. Either way the layout underneath is the
+// same: a "lantern/connections.json" suffix.
 func DefaultPath() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", dberr.Wrap(dberr.KindUnknown, "cannot locate the user config directory", err)
+	dir := os.Getenv(configDirEnv)
+	if dir == "" {
+		var err error
+		dir, err = os.UserConfigDir()
+		if err != nil {
+			return "", dberr.Wrap(dberr.KindUnknown, "cannot locate the user config directory", err)
+		}
 	}
 	return filepath.Join(dir, "lantern", "connections.json"), nil
 }

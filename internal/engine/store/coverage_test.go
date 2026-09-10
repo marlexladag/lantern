@@ -29,7 +29,14 @@ import (
 
 // -- DefaultPath ----------------------------------------------------------
 
+// Every test below explicitly clears LANTERN_CONFIG_DIR first, in case it
+// happens to be set in whoever's shell runs `go test` — otherwise the
+// override branch these tests aren't targeting could silently steal the
+// fallback-path assertions out from under them.
+
 func TestDefaultPathIsUnderTheUserConfigDir(t *testing.T) {
+	t.Setenv(configDirEnv, "")
+
 	got, err := DefaultPath()
 	if err != nil {
 		t.Fatalf("DefaultPath: %v", err)
@@ -49,11 +56,30 @@ func TestDefaultPathFailsWhenTheUserConfigDirCannotBeDetermined(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("UserConfigDir on windows depends on %AppData%, not HOME/XDG_CONFIG_HOME")
 	}
+	t.Setenv(configDirEnv, "")
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
 
 	if _, err := DefaultPath(); err == nil {
 		t.Fatal("DefaultPath succeeded despite no locatable user config directory")
+	}
+}
+
+// Coordinator-flagged: os.UserConfigDir ignores XDG_CONFIG_HOME on macOS, so
+// it alone cannot redirect a shell session's engine away from the real
+// user's saved connections while hand-testing a build. LANTERN_CONFIG_DIR
+// exists specifically to make that possible, unconditionally of platform.
+func TestDefaultPathUsesTheConfigDirOverrideWhenSet(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(configDirEnv, dir)
+
+	got, err := DefaultPath()
+	if err != nil {
+		t.Fatalf("DefaultPath: %v", err)
+	}
+	want := filepath.Join(dir, "lantern", "connections.json")
+	if got != want {
+		t.Errorf("DefaultPath = %q, want %q", got, want)
 	}
 }
 

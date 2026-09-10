@@ -84,6 +84,35 @@ Rust checks mirror what CI runs:
 cd src-tauri && cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
 
+## Running the engine directly
+
+The engine is a normal binary that speaks newline-delimited JSON-RPC on
+stdin/stdout, so it is drivable by hand without Tauri at all — useful while
+poking at a new RPC method:
+
+```sh
+go run ./cmd/engine
+{"jsonrpc":"2.0","id":1,"method":"health"}
+```
+(paste a request line, press enter, read the response line; Ctrl-D closes
+stdin, which is the engine's normal shutdown signal)
+
+**Set `LANTERN_CONFIG_DIR` before experimenting with anything that touches
+saved connections** (`connections.save`, `session.open`, …). Without it,
+`connections.list`/`save`/`delete` resolve against your real
+`connections.json` via `os.UserConfigDir()` — and on macOS that function
+ignores `XDG_CONFIG_HOME` entirely, so setting *that* instead does nothing
+to redirect it. `LANTERN_CONFIG_DIR` overrides it directly, on every
+platform:
+
+```sh
+LANTERN_CONFIG_DIR=/tmp/lantern-scratch go run ./cmd/engine
+```
+
+This writes `/tmp/lantern-scratch/lantern/connections.json` instead of your
+real one — same `lantern/connections.json` suffix underneath either way, so
+the layout you see matches production.
+
 ## Content Security Policy
 
 `src-tauri/tauri.conf.json` sets a strict `csp`. It is decided now, while the
