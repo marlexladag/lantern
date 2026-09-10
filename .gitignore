@@ -14,3 +14,6 @@ src-tauri/target/
 
 # macOS
 .DS_Store
+
+# Seeded design canvas is a build output (~2 MB); regenerate with design/generate.py
+design/tablepluslike-interface.html

@@ -1,0 +1,87 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 760
+    },
+    {
+      "file": "StagedEdits.dc.html",
+      "x": 1560,
+      "y": 0,
+      "w": 1440,
+      "h": 760,
+      "title": "Staged edits (dark)"
+    },
+    {
+      "file": "QueryEditor.dc.html",
+      "x": 3120,
+      "y": 0,
+      "w": 1440,
+      "h": 760
+    },
+    {
+      "file": "ConnectionDialog.dc.html",
+      "x": 0,
+      "y": 940,
+      "w": 620,
+      "h": 720
+    },
+    {
+      "file": "States.dc.html",
+      "x": 780,
+      "y": 940,
+      "w": 1240,
+      "h": 720
+    },
+    {
+      "file": "Foundations.dc.html",
+      "x": 2140,
+      "y": 940,
+      "w": 940,
+      "h": 1180
+    },
+    {
+      "file": "Keyboard.dc.html",
+      "x": 3200,
+      "y": 940,
+      "w": 940,
+      "h": 600
+    }
+  ],
+  "annotations": [
+    {
+      "id": "brief",
+      "x": 0,
+      "y": -190,
+      "w": 620,
+      "text": "tablepluslike \u2014 UI/UX direction\n\nDense, calm, keyboard-first. Original visual language, not a copy of any shipping client.\n\nRow 1: the three screens you live in. Row 2: entry points, states, and the tokens to build against."
+    },
+    {
+      "id": "note-staged",
+      "x": 1560,
+      "y": -120,
+      "w": 560,
+      "text": "Nothing reaches the database until Commit. Amber = modified (old value struck through beside the new one), green = inserted, red strike = deleted. The tab carries a dot so you cannot lose track of a dirty table."
+    },
+    {
+      "id": "note-query",
+      "x": 3120,
+      "y": -120,
+      "w": 520,
+      "text": "Results stream in while the query runs, and Cancel is on screen the whole time \u2014 never buried in a menu."
+    },
+    {
+      "id": "note-safety",
+      "x": 0,
+      "y": 1710,
+      "w": 620,
+      "text": "Connection colour is a safety feature, not decoration. Production is red, tints the whole window, and defaults to read-only."
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

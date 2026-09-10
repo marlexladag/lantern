@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+:root{
+  --bg:#f2f1ee; --surface:#fbfaf8; --alt:#f6f5f2; --line:#dedbd5; --hair:#eae7e2;
+  --text:#23211e; --dim:#6f6a63; --faint:#7d766d;
+  --accent:#24707a; --accent-bg:#deeef0; --sel:#e7f0f0;
+  --danger:#9e4436; --danger-bg:#f6e6e2;
+  --warn:#a8792c; --warn-bg:#f7eeda;
+  --ok:#3d7d55; --ok-bg:#e3efe6;
+}
+
+*{box-sizing:border-box;}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+ font-size:12px;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;} a:hover{color:var(--text);}
+.m{font-family:'IBM Plex Mono',ui-monospace,Menlo,'Cascadia Mono',monospace;
+ font-variant-ligatures:none;}
+.app{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);}
+.tbar{flex:0 0 38px;display:flex;align-items:center;gap:14px;padding:0 12px;
+ border-bottom:1px solid var(--line);}
+.lights{display:flex;gap:8px;}
+.lt{width:11px;height:11px;border-radius:50%;}
+.body{flex:1;display:flex;min-height:0;}
+.side{flex:0 0 244px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--surface);}
+.tabs{flex:0 0 34px;display:flex;align-items:stretch;border-bottom:1px solid var(--line);background:var(--bg);}
+.tab{display:flex;align-items:center;gap:7px;padding:0 13px;font-size:12px;color:var(--dim);
+ border-right:1px solid var(--line);cursor:default;}
+.tab.on{background:var(--surface);color:var(--text);box-shadow:inset 0 -1px 0 var(--surface);font-weight:500;}
+.tool{flex:0 0 36px;display:flex;align-items:center;gap:8px;padding:0 10px;
+ border-bottom:1px solid var(--line);background:var(--surface);}
+.inp{display:flex;align-items:center;gap:6px;height:23px;padding:0 8px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--faint);font-size:11px;}
+.btn{display:flex;align-items:center;gap:6px;height:23px;padding:0 9px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--dim);font-size:11px;font-weight:500;}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.dgr{background:var(--danger);border-color:var(--danger);color:#fff;}
+.kbd{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;font-size:10px;color:var(--faint);
+ border:1px solid var(--hair);border-radius:4px;padding:1px 4px;background:var(--bg);}
+.ghead{display:grid;flex:0 0 28px;background:var(--alt);border-bottom:1px solid var(--line);}
+.ghead>div{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:500;
+ color:var(--dim);border-right:1px solid var(--hair);letter-spacing:.02em;overflow:hidden;}
+.grow{display:grid;flex:0 0 26px;border-bottom:1px solid var(--hair);}
+.grow>div{display:flex;align-items:center;padding:0 10px;font-size:12px;border-right:1px solid var(--hair);
+ overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.grow.sel{background:var(--sel);}
+.num{justify-content:flex-end;color:var(--dim);}
+.null{color:var(--dim);font-style:italic;}
+.stat{flex:0 0 26px;display:flex;align-items:center;gap:14px;padding:0 12px;font-size:11px;
+ color:var(--dim);border-top:1px solid var(--line);background:var(--bg);}
+.sect{padding:9px 12px 5px;font-size:10px;font-weight:600;letter-spacing:.07em;
+ text-transform:uppercase;color:var(--faint);}
+.row{display:flex;align-items:center;gap:7px;height:24px;padding:0 10px;color:var(--text);}
+.row.on{background:var(--sel);font-weight:500;}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;}
+.sp{flex:1;}
+
+.app{width:940px;height:600px;}
+
+.fwrap{width:940px;height:1120px;padding:30px 34px;display:flex;flex-direction:column;
+ gap:22px;background:var(--bg);overflow:hidden;}
+.h2{font-size:10px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+ color:var(--faint);padding-bottom:7px;border-bottom:1px solid var(--line);}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:15px 17px;}
+.swz{display:flex;flex-direction:column;gap:5px;align-items:flex-start;}
+.chip{width:100%;height:34px;border-radius:5px;border:1px solid rgba(0,0,0,.09);}
+.cname{font-size:10px;color:var(--dim);} .chex{font-size:10px;color:var(--faint);}
+.krow{display:flex;align-items:center;gap:9px;height:21px;font-size:11px;}
+.kk{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;font-size:10px;
+ border:1px solid var(--line);border-radius:3px;padding:1px 5px;background:var(--bg);
+ color:var(--dim);flex:0 0 auto;min-width:34px;text-align:center;}
+.dsr{display:flex;align-items:baseline;gap:12px;height:23px;font-size:11px;color:var(--dim);}
+.dsr b{font-weight:600;color:var(--text);font-family:'IBM Plex Mono',ui-monospace,monospace;
+ font-size:11px;min-width:62px;}
+
+  </style>
+</helmet>
+<div class="fwrap" style="height:600px">
+  <div>
+    <div style="font-size:19px;font-weight:600;letter-spacing:-.01em">Keyboard</div>
+    <div style="font-size:12px;color:var(--dim);margin-top:3px">
+      The app is drivable without a mouse. Every shortcut below is part of the design,
+      not a later addition.</div>
+  </div>
+  <div style="flex:1;display:flex;flex-direction:column;min-height:0">
+    <div class="card" style="flex:1;display:grid;
+     grid-template-columns:repeat(2,minmax(0,1fr));gap:20px 26px;align-content:start">
+      <div style="display:flex;flex-direction:column;gap:6px"><span class="cname" style="font-weight:600;color:var(--text)">Global</span><div class="krow"><span class="kk">&#8984;K</span><span style="color:var(--dim)">Quick-open any connection, table or saved query</span></div><div class="krow"><span class="kk">&#8984;T</span><span style="color:var(--dim)">New tab</span></div><div class="krow"><span class="kk">&#8984;W</span><span style="color:var(--dim)">Close tab</span></div><div class="krow"><span class="kk">&#8984;1&ndash;9</span><span style="color:var(--dim)">Jump to tab</span></div><div class="krow"><span class="kk">&#8984;E</span><span style="color:var(--dim)">Toggle SQL editor</span></div><div class="krow"><span class="kk">&#8984;R</span><span style="color:var(--dim)">Refresh table / re-run query</span></div></div><div style="display:flex;flex-direction:column;gap:6px"><span class="cname" style="font-weight:600;color:var(--text)">Grid</span><div class="krow"><span class="kk">&#8593;&#8595;&#8592;&#8594;</span><span style="color:var(--dim)">Move selection</span></div><div class="krow"><span class="kk">&#8677;</span><span style="color:var(--dim)">Next cell &middot; &#8679;&#8677; previous</span></div><div class="krow"><span class="kk">&#9166;</span><span style="color:var(--dim)">Edit cell &middot; &#9166; again commits to the change set</span></div><div class="krow"><span class="kk">esc</span><span style="color:var(--dim)">Abandon the edit</span></div><div class="krow"><span class="kk">&#8984;N</span><span style="color:var(--dim)">Insert row</span></div><div class="krow"><span class="kk">&#8984;&#8998;</span><span style="color:var(--dim)">Mark row deleted</span></div><div class="krow"><span class="kk">&#8984;F</span><span style="color:var(--dim)">Filter rows</span></div></div><div style="display:flex;flex-direction:column;gap:6px"><span class="cname" style="font-weight:600;color:var(--text)">Editor</span><div class="krow"><span class="kk">&#8984;R</span><span style="color:var(--dim)">Run</span></div><div class="krow"><span class="kk">&#8984;&#8679;R</span><span style="color:var(--dim)">Run selection</span></div><div class="krow"><span class="kk">&#8984;.</span><span style="color:var(--dim)">Cancel the running query</span></div><div class="krow"><span class="kk">&#8984;&#8679;F</span><span style="color:var(--dim)">Format SQL</span></div><div class="krow"><span class="kk">&#8984;/</span><span style="color:var(--dim)">Toggle comment</span></div></div><div style="display:flex;flex-direction:column;gap:6px"><span class="cname" style="font-weight:600;color:var(--text)">Changes</span><div class="krow"><span class="kk">&#8984;S</span><span style="color:var(--dim)">Commit staged changes</span></div><div class="krow"><span class="kk">&#8984;&#8679;P</span><span style="color:var(--dim)">Preview generated SQL</span></div><div class="krow"><span class="kk">&#8984;Z</span><span style="color:var(--dim)">Undo the last staged change</span></div></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

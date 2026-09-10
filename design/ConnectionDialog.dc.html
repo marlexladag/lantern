@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+:root{
+  --bg:#f2f1ee; --surface:#fbfaf8; --alt:#f6f5f2; --line:#dedbd5; --hair:#eae7e2;
+  --text:#23211e; --dim:#6f6a63; --faint:#7d766d;
+  --accent:#24707a; --accent-bg:#deeef0; --sel:#e7f0f0;
+  --danger:#9e4436; --danger-bg:#f6e6e2;
+  --warn:#a8792c; --warn-bg:#f7eeda;
+  --ok:#3d7d55; --ok-bg:#e3efe6;
+}
+
+*{box-sizing:border-box;}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+ font-size:12px;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;} a:hover{color:var(--text);}
+.m{font-family:'IBM Plex Mono',ui-monospace,Menlo,'Cascadia Mono',monospace;
+ font-variant-ligatures:none;}
+.app{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);}
+.tbar{flex:0 0 38px;display:flex;align-items:center;gap:14px;padding:0 12px;
+ border-bottom:1px solid var(--line);}
+.lights{display:flex;gap:8px;}
+.lt{width:11px;height:11px;border-radius:50%;}
+.body{flex:1;display:flex;min-height:0;}
+.side{flex:0 0 244px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--surface);}
+.tabs{flex:0 0 34px;display:flex;align-items:stretch;border-bottom:1px solid var(--line);background:var(--bg);}
+.tab{display:flex;align-items:center;gap:7px;padding:0 13px;font-size:12px;color:var(--dim);
+ border-right:1px solid var(--line);cursor:default;}
+.tab.on{background:var(--surface);color:var(--text);box-shadow:inset 0 -1px 0 var(--surface);font-weight:500;}
+.tool{flex:0 0 36px;display:flex;align-items:center;gap:8px;padding:0 10px;
+ border-bottom:1px solid var(--line);background:var(--surface);}
+.inp{display:flex;align-items:center;gap:6px;height:23px;padding:0 8px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--faint);font-size:11px;}
+.btn{display:flex;align-items:center;gap:6px;height:23px;padding:0 9px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--dim);font-size:11px;font-weight:500;}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.dgr{background:var(--danger);border-color:var(--danger);color:#fff;}
+.kbd{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;font-size:10px;color:var(--faint);
+ border:1px solid var(--hair);border-radius:4px;padding:1px 4px;background:var(--bg);}
+.ghead{display:grid;flex:0 0 28px;background:var(--alt);border-bottom:1px solid var(--line);}
+.ghead>div{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:500;
+ color:var(--dim);border-right:1px solid var(--hair);letter-spacing:.02em;overflow:hidden;}
+.grow{display:grid;flex:0 0 26px;border-bottom:1px solid var(--hair);}
+.grow>div{display:flex;align-items:center;padding:0 10px;font-size:12px;border-right:1px solid var(--hair);
+ overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.grow.sel{background:var(--sel);}
+.num{justify-content:flex-end;color:var(--dim);}
+.null{color:var(--dim);font-style:italic;}
+.stat{flex:0 0 26px;display:flex;align-items:center;gap:14px;padding:0 12px;font-size:11px;
+ color:var(--dim);border-top:1px solid var(--line);background:var(--bg);}
+.sect{padding:9px 12px 5px;font-size:10px;font-weight:600;letter-spacing:.07em;
+ text-transform:uppercase;color:var(--faint);}
+.row{display:flex;align-items:center;gap:7px;height:24px;padding:0 10px;color:var(--text);}
+.row.on{background:var(--sel);font-weight:500;}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;}
+.sp{flex:1;}
+
+.app{width:620px;height:720px;}
+
+.fld{display:flex;flex-direction:column;gap:5px;}
+.lbl{font-size:11px;color:var(--dim);font-weight:500;letter-spacing:.01em;}
+.txt{height:28px;border:1px solid var(--line);border-radius:5px;background:var(--surface);
+ display:flex;align-items:center;padding:0 9px;font-size:12px;}
+.txt.ph{color:var(--faint);}
+.txt.foc{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
+.seg{display:flex;border:1px solid var(--line);border-radius:5px;overflow:hidden;}
+.seg>div{flex:1;height:28px;display:flex;align-items:center;justify-content:center;
+ font-size:12px;border-right:1px solid var(--line);background:var(--surface);}
+.seg>div:last-child{border-right:0;}
+.seg>div.on{background:var(--accent);color:#fff;font-weight:500;}
+.sw{width:26px;height:26px;border-radius:50%;border:2px solid transparent;}
+.sw.on{border-color:var(--text);box-shadow:inset 0 0 0 2px var(--surface);}
+.chk{width:14px;height:14px;border-radius:3.5px;border:1.5px solid var(--line);
+ background:var(--surface);flex:0 0 14px;}
+.chk.on{background:var(--danger);border-color:var(--danger);}
+.crow{display:flex;align-items:center;gap:8px;font-size:12px;}
+.tgl{width:30px;height:17px;border-radius:9px;background:var(--danger);
+ display:flex;align-items:center;justify-content:flex-end;padding:2px;flex:0 0 30px;}
+.tgl>span{width:13px;height:13px;border-radius:50%;background:#fff;display:block;}
+.caret{display:inline-block;width:1.5px;height:14px;background:var(--accent);
+ vertical-align:-3px;margin-left:1px;}
+.app .btn{height:28px;padding:0 13px;}
+.chk{border-radius:4px;}
+
+  </style>
+</helmet>
+<div class="app" style="background:var(--bg)">
+  <div style="flex:0 0 46px;display:flex;align-items:center;padding:0 18px;
+   border-bottom:1px solid var(--line)">
+    <b style="font-size:14px;font-weight:600">New Connection</b>
+    <span class="sp"></span><span style="color:var(--faint)">&#10005;</span>
+  </div>
+
+  <div style="flex:1;padding:18px;display:flex;flex-direction:column;gap:15px;overflow:hidden">
+
+    <div class="fld"><span class="lbl">Driver</span>
+      <div class="seg"><div class="on">MySQL</div><div>MariaDB</div><div>SQLite</div></div></div>
+
+    <div class="fld"><span class="lbl">Name</span>
+      <div class="txt foc">prod<span class="caret"></span></div></div>
+
+    <div style="display:grid;grid-template-columns:1fr 96px;gap:12px">
+      <div class="fld"><span class="lbl">Host</span>
+        <div class="txt m">db-primary.internal</div></div>
+      <div class="fld"><span class="lbl">Port</span>
+        <div class="txt m">3306</div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div class="fld"><span class="lbl">Username</span>
+        <div class="txt m">app_readonly</div></div>
+      <div class="fld"><span class="lbl">Password</span>
+        <div class="txt m">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</div></div>
+    </div>
+    <div style="margin-top:-9px;display:flex;align-items:center;gap:6px;
+     font-size:11px;color:var(--dim)"><svg viewBox="0 0 16 16" width="11" height="11" style="flex:0 0 11px;opacity:.75"><rect x="3.5" y="7" width="9" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 7V5.4a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><span>Stored in the system keychain, never in the app's config file</span></div>
+
+    <div class="fld"><span class="lbl">Database</span>
+      <div class="txt ph">All databases</div></div>
+
+    <div class="fld"><span class="lbl">Colour</span>
+      <div style="display:flex;gap:9px;align-items:center"><span class="sw" style="background:#3d7d55"></span><span class="sw" style="background:#24707a"></span><span class="sw" style="background:#4a6ea8"></span><span class="sw" style="background:#7a5aa0"></span><span class="sw" style="background:#a8792c"></span><span class="sw on" style="background:#9e4436"></span>
+        <span class="sp"></span>
+        <span style="font-size:11px;color:var(--dim)">Tints the window and every tab</span></div></div>
+
+    <div style="border:1px solid var(--danger);border-radius:7px;background:var(--danger-bg);
+     padding:12px 13px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:8px;color:var(--danger)">
+        <svg viewBox="0 0 16 16" width="13" height="13" style="flex:0 0 13px"><path d="M8 2.6l6 10.8H2z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.6v3.1M8 11.5v.1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg><b style="font-weight:600;font-size:12px">Production connection</b>
+        <span class="sp"></span><span class="tgl"><span></span></span></div>
+      <div class="crow"><span class="chk on" style="display:flex;align-items:center;
+       justify-content:center;color:#fff;font-size:10px">&#10003;</span>
+        <span>Open new tabs in read-only mode</span></div>
+      <div class="crow"><span class="chk on" style="display:flex;align-items:center;
+       justify-content:center;color:#fff;font-size:10px">&#10003;</span>
+        <span>Confirm before <span class="m">UPDATE</span> or <span class="m">DELETE</span>
+        without <span class="m">WHERE</span></span></div>
+    </div>
+  </div>
+
+  <div style="flex:0 0 58px;display:flex;align-items:center;gap:9px;padding:0 18px;
+   border-top:1px solid var(--line)">
+    <div class="btn">Test Connection</div>
+    <span style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ok)">
+      <span class="dot" style="background:var(--ok)"></span>Reachable &middot; 24 ms</span>
+    <span class="sp"></span>
+    <div class="btn">Cancel</div>
+    <div class="btn dgr">Connect
+      <span class="kbd" style="color:#fff;border-color:#ffffff55">&#8984;&#9166;</span></div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

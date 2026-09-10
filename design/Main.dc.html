@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+:root{
+  --bg:#f2f1ee; --surface:#fbfaf8; --alt:#f6f5f2; --line:#dedbd5; --hair:#eae7e2;
+  --text:#23211e; --dim:#6f6a63; --faint:#7d766d;
+  --accent:#24707a; --accent-bg:#deeef0; --sel:#e7f0f0;
+  --danger:#9e4436; --danger-bg:#f6e6e2;
+  --warn:#a8792c; --warn-bg:#f7eeda;
+  --ok:#3d7d55; --ok-bg:#e3efe6;
+}
+
+*{box-sizing:border-box;}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+ font-size:12px;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;} a:hover{color:var(--text);}
+.m{font-family:'IBM Plex Mono',ui-monospace,Menlo,'Cascadia Mono',monospace;
+ font-variant-ligatures:none;}
+.app{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);}
+.tbar{flex:0 0 38px;display:flex;align-items:center;gap:14px;padding:0 12px;
+ border-bottom:1px solid var(--line);}
+.lights{display:flex;gap:8px;}
+.lt{width:11px;height:11px;border-radius:50%;}
+.body{flex:1;display:flex;min-height:0;}
+.side{flex:0 0 244px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--surface);}
+.tabs{flex:0 0 34px;display:flex;align-items:stretch;border-bottom:1px solid var(--line);background:var(--bg);}
+.tab{display:flex;align-items:center;gap:7px;padding:0 13px;font-size:12px;color:var(--dim);
+ border-right:1px solid var(--line);cursor:default;}
+.tab.on{background:var(--surface);color:var(--text);box-shadow:inset 0 -1px 0 var(--surface);font-weight:500;}
+.tool{flex:0 0 36px;display:flex;align-items:center;gap:8px;padding:0 10px;
+ border-bottom:1px solid var(--line);background:var(--surface);}
+.inp{display:flex;align-items:center;gap:6px;height:23px;padding:0 8px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--faint);font-size:11px;}
+.btn{display:flex;align-items:center;gap:6px;height:23px;padding:0 9px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--dim);font-size:11px;font-weight:500;}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.dgr{background:var(--danger);border-color:var(--danger);color:#fff;}
+.kbd{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;font-size:10px;color:var(--faint);
+ border:1px solid var(--hair);border-radius:4px;padding:1px 4px;background:var(--bg);}
+.ghead{display:grid;flex:0 0 28px;background:var(--alt);border-bottom:1px solid var(--line);}
+.ghead>div{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:500;
+ color:var(--dim);border-right:1px solid var(--hair);letter-spacing:.02em;overflow:hidden;}
+.grow{display:grid;flex:0 0 26px;border-bottom:1px solid var(--hair);}
+.grow>div{display:flex;align-items:center;padding:0 10px;font-size:12px;border-right:1px solid var(--hair);
+ overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.grow.sel{background:var(--sel);}
+.num{justify-content:flex-end;color:var(--dim);}
+.null{color:var(--dim);font-style:italic;}
+.stat{flex:0 0 26px;display:flex;align-items:center;gap:14px;padding:0 12px;font-size:11px;
+ color:var(--dim);border-top:1px solid var(--line);background:var(--bg);}
+.sect{padding:9px 12px 5px;font-size:10px;font-weight:600;letter-spacing:.07em;
+ text-transform:uppercase;color:var(--faint);}
+.row{display:flex;align-items:center;gap:7px;height:24px;padding:0 10px;color:var(--text);}
+.row.on{background:var(--sel);font-weight:500;}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;}
+.sp{flex:1;}
+
+.app{width:1440px;height:760px;}
+
+  </style>
+</helmet>
+<div class="app">
+  <div class="tbar">
+  <div class="lights"><span class="lt" style="background:#e05c4b"></span>
+   <span class="lt" style="background:#dfa63a"></span>
+   <span class="lt" style="background:#4fa864"></span></div>
+  <div style="display:flex;align-items:center;gap:7px;height:23px;padding:0 10px;
+   border:1px solid var(--line);border-radius:11px;background:var(--surface)">
+    <span class="dot" style="background:#3d7d55"></span>
+    <span style="font-weight:500">local</span>
+    <span style="color:var(--faint)">shopdb &middot; mysql</span>
+  </div>
+  <div class="sp"></div>
+  <div class="inp" style="width:210px"><svg viewBox="0 0 16 16" width="11" height="11" style="flex:0 0 11px;opacity:.55"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.2 10.2L13.5 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>Search tables, columns</span>
+    <span class="sp"></span><span class="kbd">&#8984;K</span></div>
+</div>
+  <div class="body">
+    <div class="side">
+  <div class="sect">Connections</div>
+  <div class="row"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="dot" style="background:#3d7d55"></span><span style="font-weight:500">local</span><span style="color:var(--faint);font-size:11px">mysql 8.0</span><span class="sp"></span></div><div class="row"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="dot" style="background:#a8792c"></span><span style="font-weight:500">staging</span><span style="color:var(--faint);font-size:11px">mariadb 11</span><span class="sp"></span></div><div class="row"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="dot" style="background:#9e4436"></span><span style="font-weight:500">prod</span><span style="color:var(--faint);font-size:11px">mysql 8.0</span><span class="sp"></span><span style="color:var(--danger)"><svg viewBox="0 0 16 16" width="11" height="11" style="flex:0 0 11px;opacity:.75"><rect x="3.5" y="7" width="9" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 7V5.4a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.3"/></svg></span></div>
+  <div class="sect" style="margin-top:4px">shopdb</div>
+  <div class="row" style="padding-left:22px"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="font-weight:500">Tables</span>
+    <span style="color:var(--faint);font-size:11px">8</span></div>
+  <div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>order_items</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>orders</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>payments</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>products</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>sessions</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>shipping_zones</span></div><div class="row" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>user_roles</span></div><div class="row on" style="padding-left:44px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>users</span></div>
+  <div class="row" style="padding-left:22px"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="font-weight:500">Views</span>
+    <span style="color:var(--faint);font-size:11px">3</span></div>
+  <div class="row" style="padding-left:22px"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px;opacity:.55"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span style="font-weight:500">Routines</span>
+    <span style="color:var(--faint);font-size:11px">2</span></div>
+  <div class="sp"></div>
+  <div style="padding:8px 12px;border-top:1px solid var(--line);display:flex;
+   align-items:center;gap:6px;color:var(--faint);font-size:11px">
+    <span>Introspected 2m ago</span><span class="sp"></span><span class="kbd">&#8984;R</span></div>
+</div>
+    <div class="pane">
+      <div class="tabs">
+        <div class="tab on"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>users</span></div>
+        <div class="tab"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg><span>orders</span></div>
+        <div class="tab"><span>recent_sessions.sql</span></div>
+        <div class="tab" style="color:var(--faint)">+</div>
+      </div>
+      <div class="tool">
+        <div class="inp" style="width:230px"><svg viewBox="0 0 16 16" width="11" height="11" style="flex:0 0 11px;opacity:.55"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.2 10.2L13.5 13.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>Filter rows</span>
+          <span class="sp"></span><span class="kbd">&#8984;F</span></div>
+        <div class="btn"><span>id</span>
+          <span style="color:var(--accent);font-size:9px">&#9650;</span></div>
+        <div class="btn">WHERE</div>
+        <div class="sp"></div>
+        <div class="btn"><svg viewBox="0 0 16 16" width="10" height="10" style="flex:0 0 10px"><path d="M5 3.6l7 4.4-7 4.4z" fill="currentColor"/></svg><span>SQL Editor</span><span class="kbd">&#8984;E</span></div>
+      </div>
+      <div class="ghead" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr"><div class="num"><span style="color:var(--accent);font-size:9px">&#9650;</span><span>id</span></div><div class=""><span>email</span></div><div class=""><span>full_name</span></div><div class=""><span>role</span></div><div class=""><span>created_at</span></div><div class=""><span>last_login_at</span></div><div class=""><span>is_active</span></div><div class=""><span></span></div></div>
+      <div style="flex:1;overflow:hidden;display:flex;flex-direction:column"><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1041</div><div class="m">ama.osei@example.com</div><div>Ama Osei</div><div class="m">admin</div><div class="m" style="color:var(--dim)">2024-01-14 09:02</div><div class=""><span class="m" style="color:var(--dim)">2026-09-09 21:14</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1042</div><div class="m">j.lindqvist@example.com</div><div>Johan Lindqvist</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-01-19 16:40</div><div class=""><span class="m" style="color:var(--dim)">2026-09-08 11:52</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1043</div><div class="m">priya.raman@example.com</div><div>Priya Raman</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-02-02 08:15</div><div class=""><span class="m" style="color:var(--dim)">2026-09-10 07:31</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1044</div><div class="m">t.okafor@example.com</div><div>Tobenna Okafor</div><div class="m">support</div><div class="m" style="color:var(--dim)">2024-02-11 13:27</div><div class=""><span class="m" style="color:var(--dim)">2026-08-30 19:05</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1045</div><div class="m">m.delacroix@example.com</div><div>Margot Delacroix</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-02-28 10:51</div><div class=""><span class="null">NULL</span></div><div class="m">0</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1046</div><div class="m">s.haddad@example.com</div><div>Samir Haddad</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-03-05 17:33</div><div class=""><span class="m" style="color:var(--dim)">2026-09-07 14:22</span></div><div class="m">1</div><div></div></div><div class="grow sel" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1047</div><div class="m">k.nakamura@example.com</div><div>Kaori Nakamura</div><div class="m">admin</div><div class="m" style="color:var(--dim)">2024-03-18 07:09</div><div class=""><span class="m" style="color:var(--dim)">2026-09-10 06:48</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1048</div><div class="m">e.varga@example.com</div><div>Eszter Varga</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-04-01 12:44</div><div class=""><span class="m" style="color:var(--dim)">2026-06-11 09:17</span></div><div class="m">0</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1049</div><div class="m">d.mwangi@example.com</div><div>Deshan Mwangi</div><div class="m">support</div><div class="m" style="color:var(--dim)">2024-04-22 15:12</div><div class=""><span class="m" style="color:var(--dim)">2026-09-09 18:03</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1050</div><div class="m">l.fontaine@example.com</div><div>Luc Fontaine</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-05-07 09:38</div><div class=""><span class="m" style="color:var(--dim)">2026-09-05 20:41</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1051</div><div class="m">r.abramov@example.com</div><div>Rina Abramov</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-05-19 11:20</div><div class=""><span class="null">NULL</span></div><div class="m">0</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1052</div><div class="m">b.oyelaran@example.com</div><div>Bisi Oyelaran</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-06-02 14:55</div><div class=""><span class="m" style="color:var(--dim)">2026-09-10 05:26</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1053</div><div class="m">n.svensson@example.com</div><div>Nils Svensson</div><div class="m">admin</div><div class="m" style="color:var(--dim)">2024-06-14 08:31</div><div class=""><span class="m" style="color:var(--dim)">2026-09-06 16:09</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1054</div><div class="m">c.moretti@example.com</div><div>Chiara Moretti</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-06-29 19:06</div><div class=""><span class="m" style="color:var(--dim)">2026-09-02 13:38</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1055</div><div class="m">y.tanaka@example.com</div><div>Yuki Tanaka</div><div class="m">support</div><div class="m" style="color:var(--dim)">2024-07-11 10:14</div><div class=""><span class="m" style="color:var(--dim)">2026-09-08 08:55</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1056</div><div class="m">f.almeida@example.com</div><div>Filipa Almeida</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-07-26 16:49</div><div class=""><span class="m" style="color:var(--dim)">2026-07-19 22:10</span></div><div class="m">0</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1057</div><div class="m">g.petrov@example.com</div><div>Georgi Petrov</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-08-08 07:57</div><div class=""><span class="m" style="color:var(--dim)">2026-09-09 12:04</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1058</div><div class="m">h.saito@example.com</div><div>Haruki Saito</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-08-21 13:03</div><div class=""><span class="m" style="color:var(--dim)">2026-09-10 04:19</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1059</div><div class="m">i.kowalski@example.com</div><div>Iwona Kowalski</div><div class="m">support</div><div class="m" style="color:var(--dim)">2024-09-03 09:26</div><div class=""><span class="m" style="color:var(--dim)">2026-09-01 17:47</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1060</div><div class="m">o.bekele@example.com</div><div>Oda Bekele</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-09-17 11:41</div><div class=""><span class="null">NULL</span></div><div class="m">0</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1061</div><div class="m">v.ortega@example.com</div><div>Valeria Ortega</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-10-01 15:18</div><div class=""><span class="m" style="color:var(--dim)">2026-09-07 10:32</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1062</div><div class="m">z.mensah@example.com</div><div>Zuri Mensah</div><div class="m">member</div><div class="m" style="color:var(--dim)">2024-10-14 08:52</div><div class=""><span class="m" style="color:var(--dim)">2026-09-10 03:07</span></div><div class="m">1</div><div></div></div><div class="grow" style="grid-template-columns:70px 236px 186px 104px 158px 158px 84px 1fr;"><div class="num m">1063</div><div class="m">a.lindgren@example.com</div><div>Anneli Lindgren</div><div class="m">admin</div><div class="m" style="color:var(--dim)">2024-10-28 12:35</div><div class=""><span class="m" style="color:var(--dim)">2026-09-08 15:20</span></div><div class="m">1</div><div></div></div></div>
+    </div>
+  </div>
+  <div class="stat">
+    <span><b style="font-weight:600">1,284</b> rows</span>
+    <span>500 fetched &middot; keyset</span>
+    <span>12 ms</span>
+    <span class="sp"></span>
+    <span class="m">utf8mb4_0900_ai_ci</span><span class="m">InnoDB</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

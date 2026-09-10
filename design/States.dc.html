@@ -1,0 +1,138 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <style>
+:root{
+  --bg:#f2f1ee; --surface:#fbfaf8; --alt:#f6f5f2; --line:#dedbd5; --hair:#eae7e2;
+  --text:#23211e; --dim:#6f6a63; --faint:#7d766d;
+  --accent:#24707a; --accent-bg:#deeef0; --sel:#e7f0f0;
+  --danger:#9e4436; --danger-bg:#f6e6e2;
+  --warn:#a8792c; --warn-bg:#f7eeda;
+  --ok:#3d7d55; --ok-bg:#e3efe6;
+}
+
+*{box-sizing:border-box;}
+body{margin:0;font-family:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+ font-size:12px;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased;}
+a{color:var(--accent);text-decoration:none;} a:hover{color:var(--text);}
+.m{font-family:'IBM Plex Mono',ui-monospace,Menlo,'Cascadia Mono',monospace;
+ font-variant-ligatures:none;}
+.app{display:flex;flex-direction:column;overflow:hidden;background:var(--bg);}
+.tbar{flex:0 0 38px;display:flex;align-items:center;gap:14px;padding:0 12px;
+ border-bottom:1px solid var(--line);}
+.lights{display:flex;gap:8px;}
+.lt{width:11px;height:11px;border-radius:50%;}
+.body{flex:1;display:flex;min-height:0;}
+.side{flex:0 0 244px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;}
+.pane{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--surface);}
+.tabs{flex:0 0 34px;display:flex;align-items:stretch;border-bottom:1px solid var(--line);background:var(--bg);}
+.tab{display:flex;align-items:center;gap:7px;padding:0 13px;font-size:12px;color:var(--dim);
+ border-right:1px solid var(--line);cursor:default;}
+.tab.on{background:var(--surface);color:var(--text);box-shadow:inset 0 -1px 0 var(--surface);font-weight:500;}
+.tool{flex:0 0 36px;display:flex;align-items:center;gap:8px;padding:0 10px;
+ border-bottom:1px solid var(--line);background:var(--surface);}
+.inp{display:flex;align-items:center;gap:6px;height:23px;padding:0 8px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--faint);font-size:11px;}
+.btn{display:flex;align-items:center;gap:6px;height:23px;padding:0 9px;border:1px solid var(--line);
+ border-radius:4px;background:var(--bg);color:var(--dim);font-size:11px;font-weight:500;}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.dgr{background:var(--danger);border-color:var(--danger);color:#fff;}
+.kbd{font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;font-size:10px;color:var(--faint);
+ border:1px solid var(--hair);border-radius:4px;padding:1px 4px;background:var(--bg);}
+.ghead{display:grid;flex:0 0 28px;background:var(--alt);border-bottom:1px solid var(--line);}
+.ghead>div{display:flex;align-items:center;gap:5px;padding:0 10px;font-size:11px;font-weight:500;
+ color:var(--dim);border-right:1px solid var(--hair);letter-spacing:.02em;overflow:hidden;}
+.grow{display:grid;flex:0 0 26px;border-bottom:1px solid var(--hair);}
+.grow>div{display:flex;align-items:center;padding:0 10px;font-size:12px;border-right:1px solid var(--hair);
+ overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+.grow.sel{background:var(--sel);}
+.num{justify-content:flex-end;color:var(--dim);}
+.null{color:var(--dim);font-style:italic;}
+.stat{flex:0 0 26px;display:flex;align-items:center;gap:14px;padding:0 12px;font-size:11px;
+ color:var(--dim);border-top:1px solid var(--line);background:var(--bg);}
+.sect{padding:9px 12px 5px;font-size:10px;font-weight:600;letter-spacing:.07em;
+ text-transform:uppercase;color:var(--faint);}
+.row{display:flex;align-items:center;gap:7px;height:24px;padding:0 10px;color:var(--text);}
+.row.on{background:var(--sel);font-weight:500;}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;}
+.sp{flex:1;}
+
+.app{width:1240px;height:720px;}
+
+.wrap{width:1240px;height:720px;padding:26px;display:grid;
+ grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));
+ gap:26px;background:var(--bg);}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:9px;
+ display:flex;flex-direction:column;overflow:hidden;}
+.ptitle{flex:0 0 31px;border-bottom:1px solid var(--hair);display:flex;align-items:center;
+ padding:0 13px;font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+ color:var(--faint);}
+.pbody{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+ gap:11px;padding:22px;text-align:center;}
+.bar{width:230px;height:4px;border-radius:2px;background:var(--hair);overflow:hidden;}
+.bar>div{height:100%;background:var(--accent);}
+.badge{font-size:10px;font-weight:600;letter-spacing:.07em;padding:3px 7px;border-radius:4px;}
+.big{font-size:14px;font-weight:600;}
+.sub{font-size:12px;color:var(--dim);max-width:340px;line-height:1.5;}
+
+  </style>
+</helmet>
+<div class="wrap">
+
+  <div class="panel"><div class="ptitle">Connecting</div>
+    <div class="pbody">
+      <span class="dot" style="width:11px;height:11px;background:var(--danger);
+       box-shadow:0 0 0 5px var(--danger-bg)"></span>
+      <span class="big">Connecting to prod</span>
+      <span class="sub m" style="font-size:11px">db-primary.internal:3306</span>
+      <div class="btn" style="margin-top:4px">Cancel<span class="kbd">esc</span></div>
+    </div></div>
+
+  <div class="panel"><div class="ptitle">Introspecting a large schema</div>
+    <div class="pbody">
+      <span class="big">Reading schema</span>
+      <div class="bar"><div style="width:32%"></div></div>
+      <span class="sub"><b class="m" style="font-weight:500">412</b> of
+        <b class="m" style="font-weight:500">906</b> tables</span>
+      <span class="sub" style="font-size:11px">Tables appear in the sidebar as they load &mdash;
+        columns are read only when you expand one.</span>
+    </div></div>
+
+  <div class="panel"><div class="ptitle">Empty result</div>
+    <div class="pbody">
+      <span style="opacity:.45;transform:scale(2.1);margin-bottom:6px"><svg viewBox="0 0 16 16" width="12" height="12" style="flex:0 0 12px;opacity:.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 6.6h11M6.6 6.6v5.9" stroke="currentColor" stroke-width="1.2" fill="none"/></svg></span>
+      <span class="big">No rows returned</span>
+      <span class="sub m" style="font-size:11px;background:var(--alt);padding:7px 10px;
+       border-radius:5px;border:1px solid var(--hair)">
+        SELECT * FROM users WHERE role = 'owner'</span>
+      <span class="sub" style="font-size:11px">The query ran in 8&nbsp;ms.
+        <a href="#">Clear the filter</a> to see all 1,284 rows.</span>
+    </div></div>
+
+  <div class="panel" style="border-color:var(--danger)">
+    <div class="ptitle" style="color:var(--danger)">Error</div>
+    <div class="pbody">
+      <span class="badge" style="background:var(--danger-bg);color:var(--danger)">AUTH</span>
+      <span class="big">Access denied for user &lsquo;app_readonly&rsquo;</span>
+      <span class="sub">The credentials in your keychain were rejected by
+        <span class="m">db-primary.internal</span>. Nothing was run.</span>
+      <span class="sub m" style="font-size:11px;color:var(--dim);background:var(--alt);
+       padding:6px 9px;border-radius:5px;border:1px solid var(--hair)">
+        ERROR 1045 (28000): Access denied &middot; using password: YES</span>
+      <div style="display:flex;gap:8px;margin-top:2px">
+        <div class="btn">Edit connection</div>
+        <div class="btn pri">Retry<span class="kbd" style="color:#fff;
+         border-color:#ffffff55">&#8984;R</span></div></div>
+    </div></div>
+
+</div>
+</x-dc>
+</body>
+</html>
