@@ -104,11 +104,24 @@ func (s *Server) dispatch(ctx context.Context, enc *Encoder, req *Request) {
 					ID:      req.ID,
 					Error:   Errorf(CodeInternal, "internal error"),
 				}
+				// Encode errors are deliberately dropped here and in
+				// reply below, unlike in Serve, which returns them. The
+				// asymmetry is intentional: Serve owns the read loop and
+				// can turn a dead stdout into a process-level failure,
+				// but dispatch runs on its own goroutine with no caller
+				// to return to and no way to abort the loop. The only
+				// realistic cause is stdout being closed - i.e. the shell
+				// is already gone - and in that case Serve's next Decode
+				// hits EOF and shuts the engine down anyway. Logging to
+				// stderr would also be futile in the crashed-shell case
+				// and noisy in the shutdown case, so this stays silent.
 				_ = enc.Encode(resp)
 			}
 		}
 	}()
 
+	// See the encode-error note in the recover block above: a failed
+	// write here has nowhere to go and no recovery worth attempting.
 	reply := func(resp *Response) {
 		if req.IsNotification() {
 			return

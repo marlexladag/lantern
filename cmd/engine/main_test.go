@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -108,6 +109,18 @@ func TestEngineExitsWhenStdinCloses(t *testing.T) {
 // written to stdout — stdout is the protocol stream and a shutdown must not
 // contaminate it.
 func TestEngineExitsOnSIGTERMWithIdleStdin(t *testing.T) {
+	// syscall.SIGTERM is *defined* on Windows, so this file compiles there,
+	// but Windows has no POSIX signal delivery: os.Process.Signal returns
+	// "not supported by windows" for anything other than os.Kill. The test
+	// would therefore always fail on a Windows developer's machine while
+	// passing in CI (which runs Go tests on Linux only) - a failure that
+	// says nothing about the code under test. Windows shutdown rides on
+	// stdin EOF instead, which TestEngineExitsWhenStdinCloses covers on
+	// every platform.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals are not deliverable on Windows; stdin EOF is the shutdown path there")
+	}
+
 	cmd := exec.Command(buildEngine(t))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
