@@ -5,14 +5,46 @@ on:
     branches: [master, main]
   pull_request:
 
+# Nothing here writes to the repository: these jobs build, test, and upload
+# workflow artifacts, none of which needs a writable GITHUB_TOKEN. Pinning the
+# default scope to read-only means a compromised dependency in any job cannot
+# push commits, move tags, or cut a release with the token it is handed.
+permissions:
+  contents: read
+
+# One live run per branch or PR. A newer push makes the older run's verdict
+# irrelevant, and `bundle` alone occupies three runners for several minutes,
+# so superseded runs are cancelled rather than left to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   engine:
     name: engine tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # build-sidecars.sh stamps each binary with `git describe --tags`.
+          # checkout defaults to a depth-1 clone with no tags, which makes
+          # that fall through to `--always`'s bare short hash - the same
+          # value the next line already computes as the commit, so the UI
+          # would render "Engine 1c97074 (1c97074)". Full history + tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # ci-workflow_test.sh parses this file with PyYAML. Today's ubuntu
+      # image happens to ship it, but that is the image's choice and not a
+      # promise; declare the dependency so the validator cannot start failing
+      # because a runner image dropped a package.
+      - name: Install validator dependencies
+        run: python3 -m pip install PyYAML
       - name: Validate workflow
         run: ./scripts/ci-workflow_test.sh
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.23'
@@ -20,9 +52,10 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test ./... -race
-      - name: Cross-compile all sidecar targets
-        run: ./scripts/build-sidecars.sh
-      - name: Verify sidecar naming contract
+      # build-sidecars_test.sh deletes the output directory and runs
+      # build-sidecars.sh itself, so a separate build step before it would
+      # only be thrown away.
+      - name: Cross-compile all sidecar targets and verify the naming contract
         run: ./scripts/build-sidecars_test.sh
 
   ui:
@@ -35,11 +68,67 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci
+      # vitest transpiles per file without typechecking, so a type error can
+      # sail past the tests and only surface inside `bundle`, behind a full
+      # Rust build on three runners. Typecheck here: it takes seconds on the
+      # cheapest job in the graph.
+      - name: Typecheck
+        run: npm run typecheck
       - run: npm test
+
+  rust:
+    name: rust checks
+    # Same runner as the Linux bundle job: building the tauri crate needs the
+    # WebKitGTK development headers either way, and 22.04 is the glibc this
+    # project's Linux bundles target.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-checks-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      # tauri-build resolves every externalBin for the host triple at compile
+      # time and fails with "resource path binaries/engine-<triple> doesn't
+      # exist" if it cannot. So even a check-only Rust job needs the sidecars
+      # on disk first - they are gitignored, so a fresh checkout has none.
+      # (`dist/` is deliberately NOT built here: a dev-profile build resolves
+      # the frontend from devUrl and never reads it.)
+      - name: Build sidecars
+        run: ./scripts/build-sidecars.sh
+
+      - name: Format
+        run: cargo fmt --check
+        working-directory: src-tauri
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+      - name: Test
+        run: cargo test
+        working-directory: src-tauri
 
   bundle:
     name: bundle (${{ matrix.os }})
-    needs: [engine, ui]
+    needs: [engine, ui, rust]
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +136,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Same reason as the engine job: the sidecar version stamp comes
+          # from `git describe --tags`.
+          fetch-depth: 0
 
       # ubuntu-22.04 rather than latest: bundling against an older glibc keeps
       # the AppImage usable on distributions that ship an older runtime.

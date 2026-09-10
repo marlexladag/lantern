@@ -39,45 +39,83 @@ fi
 pass "Workflow YAML parses correctly"
 
 # Check 3: Extract and verify all shell scripts referenced
-# Note: Only detects scripts with ./ prefix (e.g., ./scripts/foo.sh).
-# Does not detect bash scripts/foo.sh or other forms.
+#
+# Every `*.sh` token in a `run:` block is matched, not just the `./foo.sh`
+# form the original regex looked for. The narrow version was a vacuous-pass
+# hazard: rewriting a step as `bash scripts/foo.sh` made the script invisible
+# to this check, which would then report success having verified nothing at
+# all — the exact failure mode the rest of this validator is written to avoid.
+#
+# How a script is invoked decides what is required of it:
+#   ./scripts/foo.sh  or  scripts/foo.sh   -> the kernel execs it: must exist
+#                                             AND carry the executable bit
+#   bash scripts/foo.sh, sh ..., source ...-> the interpreter opens and reads
+#                                             it: must exist; the exec bit is
+#                                             irrelevant, so requiring it here
+#                                             would be a false failure
 echo
 echo "Checking shell scripts..."
 SCRIPTS=$(python3 -c "
 import yaml
-import sys
 import re
 
 with open('$WORKFLOW_FILE') as f:
     workflow = yaml.safe_load(f)
 
-scripts = set()
+# Commands that read a script rather than exec it, so the executable bit is
+# not required. '.' is bash's source builtin.
+READERS = {'bash', 'sh', 'zsh', 'dash', 'ksh', 'source', '.'}
+
+# A path-like token ending in .sh, with an optional leading './'. The leading
+# boundary keeps 'foo.sh' inside a longer word (e.g. 'notascript.shx' or a
+# URL fragment) from matching.
+TOKEN = re.compile(r'(?<![\w./\\-])(\./)?((?:[\w.-]+/)*[\w.-]+\.sh)\b')
+
+scripts = {}
 for job_name, job in workflow.get('jobs', {}).items():
     for step in job.get('steps', []):
-        run_cmd = step.get('run', '')
-        if run_cmd:
-            # Extract script paths that start with ./
-            for match in re.finditer(r'\./([\w\-./]+\.sh)', run_cmd):
-                scripts.add(match.group(1))
+        run_cmd = step.get('run', '') or ''
+        for line in run_cmd.splitlines():
+            for match in TOKEN.finditer(line):
+                path = match.group(2)
+                # The word immediately before the token decides the mode.
+                before = line[:match.start()].split()
+                prev = before[-1] if before else ''
+                mode = 'read' if prev in READERS else 'exec'
+                # If the same script appears both ways, the stricter
+                # requirement wins.
+                if scripts.get(path) != 'exec':
+                    scripts[path] = mode
 
-for script in sorted(scripts):
-    print(script)
+for path in sorted(scripts):
+    print(f'{scripts[path]}:{path}')
 ")
 
 if [[ -z "$SCRIPTS" ]]; then
+    # A workflow that references no scripts is only legitimate when the repo
+    # has none to reference. This repo does have them, and CI is the only
+    # thing that runs them, so finding zero here means the extraction broke
+    # (or a step was deleted) rather than that there is nothing to check.
+    if compgen -G "$REPO_ROOT/scripts/*.sh" > /dev/null; then
+        fail "No shell scripts referenced in workflow, but $REPO_ROOT/scripts contains .sh files; the workflow should run them (or this check has stopped detecting them)"
+    fi
     pass "No shell scripts referenced in workflow"
 else
-    while IFS= read -r script; do
+    while IFS=':' read -r mode script; do
         SCRIPT_PATH="$REPO_ROOT/$script"
         if [[ ! -f "$SCRIPT_PATH" ]]; then
             fail "Referenced script does not exist: $script"
         fi
-        if [[ ! -x "$SCRIPT_PATH" ]]; then
-            fail "Referenced script is not executable: $script"
+        if [[ "$mode" == "exec" ]]; then
+            if [[ ! -x "$SCRIPT_PATH" ]]; then
+                fail "Referenced script is not executable: $script"
+            fi
+            echo "  ✓ $script (exists and executable)"
+        else
+            echo "  ✓ $script (exists; run via an interpreter, exec bit not required)"
         fi
-        echo "  ✓ $script (exists and executable)"
     done <<< "$SCRIPTS"
-    pass "All referenced scripts exist and are executable"
+    pass "All referenced scripts exist and are runnable as invoked"
 fi
 
 # Check 4: Extract and verify all npm scripts
