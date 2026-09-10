@@ -55,7 +55,7 @@ func TestJSONFieldNames(t *testing.T) {
 		Tables: []Table{{
 			Name:    "users",
 			Kind:    TableKindTable,
-			Columns: []Column{{Name: "id", DataType: "INTEGER", Nullable: true, PrimaryKey: true, Position: 0}},
+			Columns: []Column{{Name: "id", DataType: "INTEGER", Nullable: true, PrimaryKey: true, Position: 3}},
 		}},
 	}}})
 	if err != nil {
@@ -96,12 +96,18 @@ func TestJSONFieldNames(t *testing.T) {
 	if !col.PrimaryKey {
 		t.Errorf("primary_key did not round trip: want true, got false")
 	}
-	if col.Position != 0 {
-		t.Errorf("position did not round trip: want 0, got %d", col.Position)
+	if col.Position != 3 {
+		t.Errorf("position did not round trip: want 3, got %d", col.Position)
 	}
 
 	// Assert Database and Table tags
+	if len(raw.Databases) == 0 {
+		t.Fatal("databases tag: expected at least 1 database, got 0")
+	}
 	db := raw.Databases[0]
+	if len(db.Tables) == 0 {
+		t.Fatal("tables tag: expected at least 1 table, got 0")
+	}
 	if db.Name != "main" {
 		t.Errorf("database name did not round trip: want main, got %s", db.Name)
 	}
@@ -143,7 +149,7 @@ func TestTableLookupReturnsPointerToSliceEntry(t *testing.T) {
 	tbl, _ := db.Table("users")
 
 	// Mutate through the returned pointer.
-	tbl.Columns = []Column{{Name: "id", DataType: "INTEGER", Position: 0}}
+	tbl.Columns = []Column{{Name: "id", DataType: "INTEGER", Position: 3}}
 
 	// Re-lookup from the original catalog and verify the mutation is visible.
 	db2, _ := cat.Database("main")
