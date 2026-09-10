@@ -35,6 +35,30 @@ func serve(t *testing.T, s *Server, input string) []Response {
 	return got
 }
 
+// Handler is the exported wrapper over the unexported lookup used by
+// dispatch; api_test.go (internal/api) exercises a method through it, but
+// that call lands entirely inside the internal/api package's own coverage,
+// not this package's, so this package needs its own direct test too.
+func TestHandlerReturnsARegisteredHandlerAndFalseForAnUnknownMethod(t *testing.T) {
+	s := NewServer()
+	s.Register("echo", func(context.Context, json.RawMessage) (any, error) {
+		return "ok", nil
+	})
+
+	h, ok := s.Handler("echo")
+	if !ok || h == nil {
+		t.Fatalf("Handler(%q) = (%v, %v), want a handler and true", "echo", h, ok)
+	}
+	result, err := h(context.Background(), nil)
+	if err != nil || result != "ok" {
+		t.Errorf("h() = (%v, %v), want (%q, nil)", result, err, "ok")
+	}
+
+	if _, ok := s.Handler("nope"); ok {
+		t.Error("Handler(\"nope\") = true, want false for an unregistered method")
+	}
+}
+
 func TestServeDispatchesToRegisteredHandler(t *testing.T) {
 	s := NewServer()
 	s.Register("echo", func(_ context.Context, params json.RawMessage) (any, error) {

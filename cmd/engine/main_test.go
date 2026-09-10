@@ -285,3 +285,47 @@ func TestEngineExitsNonZeroOnStreamCorruption(t *testing.T) {
 		t.Errorf("stdout was not empty after a stream-corruption exit: %q", stdout.Bytes())
 	}
 }
+
+// main resolves store.DefaultPath before it starts serving, and that call
+// fails when the OS cannot locate a user config directory. This mirrors
+// store's own TestDefaultPathFailsWhenTheUserConfigDirCannotBeDetermined,
+// but exercised as a real subprocess since main() is never called in-process
+// in this package (see buildEngine's doc comment). main must report the
+// failure to stderr and exit 1 without ever touching stdout, which carries
+// only the JSON-RPC protocol.
+func TestEngineExitsNonZeroWhenUserConfigDirCannotBeDetermined(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("UserConfigDir on windows depends on %AppData%, not HOME/XDG_CONFIG_HOME")
+	}
+
+	cmd := exec.Command(buildEngine(t))
+	// Strip any inherited HOME/XDG_CONFIG_HOME and force both empty, the
+	// same failure store_test.go's own test injects with t.Setenv.
+	var env []string
+	for _, kv := range engineEnv(t) {
+		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, "HOME=", "XDG_CONFIG_HOME=")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("engine exit error = %v, want *exec.ExitError", err)
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout was not empty: %q", stdout.Bytes())
+	}
+	if !strings.Contains(stderr.String(), "engine:") {
+		t.Errorf("stderr = %q, want it to mention the engine: error", stderr.String())
+	}
+}

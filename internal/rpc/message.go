@@ -18,6 +18,19 @@ const (
 	CodeInternal       = -32603
 )
 
+// Reserved code ranges inside JSON-RPC's implementation-defined server range
+// (-32000 to -32099):
+//
+//	-32000 .. -32019  the SHELL's own failures (spawn, IPC, timeout). The Rust
+//	                  side owns these; the engine must never emit one.
+//	-32020 .. -32099  the ENGINE's application errors. The shell must never
+//	                  emit one.
+//
+// The engine uses a single code, CodeDatabase, and carries the specific Kind
+// in the error's data member — the UI branches on Kind, not on the code
+// (spec section 11).
+const CodeDatabase = -32020
+
 // Request is an incoming call. A nil ID marks a notification, which must not
 // receive a response.
 type Request struct {

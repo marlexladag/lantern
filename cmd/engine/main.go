@@ -11,8 +11,19 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/marlexladag/lantern/internal/api"
+	"github.com/marlexladag/lantern/internal/engine/store"
 	"github.com/marlexladag/lantern/internal/health"
 	"github.com/marlexladag/lantern/internal/rpc"
+
+	// Blank-imported so the sqlite driver registers itself via its init
+	// function (see driver.Register in registry.go). This is also what
+	// closes the packaging gate's blind spot: before this import,
+	// cmd/engine never linked modernc.org/sqlite, so
+	// scripts/build-sidecars_test.sh's cross-compiles of this package were
+	// never actually proving the pure-Go, CGO_ENABLED=0 property they exist
+	// to police.
+	_ "github.com/marlexladag/lantern/internal/engine/driver/sqlite"
 )
 
 // Set at build time via -ldflags "-X main.version=... -X main.commit=...".
@@ -62,8 +73,27 @@ func main() {
 		os.Exit(0)
 	}()
 
+	path, err := store.DefaultPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
+		os.Exit(1)
+	}
+	st := store.New(path, store.OSKeyring())
+	sess := api.NewSessions()
+	// Closed only on the stdin-EOF shutdown path below (this defer runs when
+	// Serve returns normally, unwinding main). The signal path a few lines
+	// up calls os.Exit(0) directly and therefore skips every deferred
+	// cleanup in this function, this one included — that is the same
+	// documented tradeoff as the wg.Wait() skip above, made for the same
+	// reason: closing live SQLite handles on a signal is not worth
+	// reintroducing the shutdown hang the readiness work above removed. The
+	// OS reclaims open file descriptors on process exit either way.
+	defer sess.CloseAll()
+
 	srv := rpc.NewServer()
 	srv.Register("health", health.Handler(version, commit))
+	api.RegisterConnections(srv, st)
+	api.RegisterSession(srv, st, sess)
 
 	// Readiness marker: written once signal handling is registered and the
 	// handler is bound, immediately before Serve starts reading. This is a

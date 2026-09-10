@@ -39,6 +39,10 @@ func (s *Server) handler(method string) (Handler, bool) {
 	return h, ok
 }
 
+// Handler returns the handler registered for a method. It exists so callers
+// can exercise a method directly without going through the stdio loop.
+func (s *Server) Handler(method string) (Handler, bool) { return s.handler(method) }
+
 // Serve reads requests until the stream closes, dispatching each in its own
 // goroutine so a slow method cannot stall the ones behind it. It returns nil
 // on a clean close, which is how the shell signals shutdown. If the stream
