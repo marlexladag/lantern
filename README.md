@@ -84,6 +84,29 @@ Rust checks mirror what CI runs:
 cd src-tauri && cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
 
+## Content Security Policy
+
+`src-tauri/tauri.conf.json` sets a strict `csp`. It is decided now, while the
+UI is one paragraph, rather than after CodeMirror 6 and Glide Data Grid land
+and the question becomes a negotiation under a deadline. Per directive:
+
+| Directive | Why |
+| --- | --- |
+| `default-src 'self'` | Fallback floor. Everything below either narrows it or names an exception. |
+| `script-src 'self'` | **The line that matters.** Only bundle code runs — no `'unsafe-inline'`, no `'unsafe-eval'`, no CDN. Vite's production output is a single same-origin module, and Tauri injects its own init scripts through the webview API, which CSP does not police. |
+| `style-src 'self' 'unsafe-inline'` | Pre-authorized deliberately. CodeMirror 6 (via style-mod) injects a `<style>` element at runtime, and runtime-injected styling is normal for the grid too. It does not widen script execution, and the exfiltration channel CSS injection would use is closed by the `img-src`/`font-src`/`connect-src` limits. **Caveat:** if a hash or nonce ever lands in `style-src`, CSP ignores `'unsafe-inline'` and those libraries break. Tauri adds a style hash automatically when `index.html` contains an inline `<style>`; it has none today, so don't add one. |
+| `img-src 'self' data: blob:` | Vite inlines small assets as `data:` URIs; `blob:` covers canvas-derived images from the grid. Neither can execute. |
+| `font-src 'self' data:` | Same reason as images: bundled or inlined by the build, never fetched. |
+| `connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost` | The IPC transport itself. `@tauri-apps/api` sends every `invoke` as a `fetch` to `ipc://localhost/<cmd>` on macOS and Linux, and `http(s)://ipc.localhost/<cmd>` on Windows. Omit these and Tauri silently falls back to `postMessage` — it still works, which is exactly what makes the omission easy to miss. |
+| `object-src 'none'`, `frame-src 'none'`, `frame-ancestors 'none'`, `worker-src 'self'`, `media-src 'none'` | Plugins, frames, framing, foreign workers and media have no role in this app. Denied explicitly rather than left to `default-src`. |
+| `base-uri 'self'` | Stops an injected `<base>` from re-pointing every relative URL. |
+| `form-action 'none'` | Nothing here submits a form; a form post is a credential-exfiltration path. |
+
+Note where this applies: Tauri attaches the CSP header in the `tauri://localhost`
+asset handler, so it governs the **bundled** app. In `tauri dev` the page is
+served by Vite over `http://localhost:1420` and no CSP is attached at all — so
+a policy change is only truly exercised by a bundled build. Test it there.
+
 ## Invariants
 
 Two rules that the tests actively guard — breaking either breaks the protocol:
