@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -71,15 +72,36 @@ func TestServeReportsParseErrorAndKeepsReading(t *testing.T) {
 		return map[string]string{"status": "ok"}, nil
 	})
 
-	got := serve(t, s, "{not json\n"+`{"jsonrpc":"2.0","id":2,"method":"health"}`+"\n")
-	if len(got) != 2 {
-		t.Fatalf("got %d responses, want 2", len(got))
+	var out strings.Builder
+	if err := s.Serve(context.Background(), strings.NewReader("{not json\n"+`{"jsonrpc":"2.0","id":2,"method":"health"}`+"\n"), &out); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
-	if got[0].Error == nil || got[0].Error.Code != CodeParse {
-		t.Errorf("first response = %+v, want parse error", got[0])
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d response lines, want 2", len(lines))
 	}
-	if got[1].Error != nil {
-		t.Errorf("second response should have succeeded: %+v", got[1].Error)
+
+	// Verify first response is parse error with id:null (JSON-RPC 2.0 requirement).
+	if !strings.Contains(lines[0], `"id":null`) {
+		t.Errorf("parse error response must contain \"id\":null, got: %s", lines[0])
+	}
+	var r Response
+	if err := json.Unmarshal([]byte(lines[0]), &r); err != nil {
+		t.Fatalf("undecodable first response: %v", err)
+	}
+	if r.Error == nil || r.Error.Code != CodeParse {
+		t.Errorf("first response = %+v, want parse error", r)
+	}
+
+	// Verify second response is successful. Use a fresh variable since
+	// json.Unmarshal doesn't clear pointer fields when they're absent from JSON.
+	var r2 Response
+	if err := json.Unmarshal([]byte(lines[1]), &r2); err != nil {
+		t.Fatalf("undecodable second response: %v, line: %q", err, lines[1])
+	}
+	if r2.Error != nil {
+		t.Errorf("second response should have succeeded, got error: %+v", r2.Error)
 	}
 }
 
@@ -102,6 +124,9 @@ func TestServeMapsHandlerErrors(t *testing.T) {
 	}
 	byID := map[string]Response{}
 	for _, r := range got {
+		if r.ID == nil {
+			t.Fatalf("response has nil ID, expected a request ID")
+		}
 		byID[string(*r.ID)] = r
 	}
 	if byID["1"].Error.Code != CodeInternal {
@@ -140,6 +165,37 @@ func TestServeSendsNoResponseToNotification(t *testing.T) {
 	}
 }
 
+// A handler that panics must not crash the server; a subsequent request succeeds.
+func TestServePanicingHandler(t *testing.T) {
+	s := NewServer()
+	s.Register("panic", func(context.Context, json.RawMessage) (any, error) {
+		panic("oops")
+	})
+	s.Register("health", func(context.Context, json.RawMessage) (any, error) {
+		return map[string]string{"status": "ok"}, nil
+	})
+
+	got := serve(t, s,
+		`{"jsonrpc":"2.0","id":1,"method":"panic"}`+"\n"+
+			`{"jsonrpc":"2.0","id":2,"method":"health"}`+"\n")
+	if len(got) != 2 {
+		t.Fatalf("got %d responses, want 2", len(got))
+	}
+	byID := map[string]Response{}
+	for _, r := range got {
+		if r.ID == nil {
+			t.Fatalf("response has nil ID, expected a request ID")
+		}
+		byID[string(*r.ID)] = r
+	}
+	if byID["1"].Error == nil || byID["1"].Error.Code != CodeInternal {
+		t.Errorf("panic response = %+v, want CodeInternal error", byID["1"])
+	}
+	if byID["2"].Error != nil {
+		t.Errorf("health response should have succeeded: %+v", byID["2"].Error)
+	}
+}
+
 // A slow handler must not block later requests: dispatch is concurrent.
 func TestServeDispatchesConcurrently(t *testing.T) {
 	s := NewServer()
@@ -157,8 +213,11 @@ func TestServeDispatchesConcurrently(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(context.Background(), pr, &out) }()
 
-	_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
-	_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"fast"}` + "\n"))
+	// Issue writes from a goroutine so the test's deadline branch is reachable.
+	go func() {
+		_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+		_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"fast"}` + "\n"))
+	}()
 
 	deadline := time.After(2 * time.Second)
 	for {
@@ -176,6 +235,21 @@ func TestServeDispatchesConcurrently(t *testing.T) {
 	_ = pw.Close()
 	if err := <-done; err != nil {
 		t.Fatalf("serve: %v", err)
+	}
+}
+
+// A stream error (other than parse) must be returned and stops reading.
+func TestServeReturnsStreamError(t *testing.T) {
+	s := NewServer()
+	s.Register("echo", func(context.Context, json.RawMessage) (any, error) {
+		return "ok", nil
+	})
+
+	reader := iotest.ErrReader(errors.New("boom"))
+	if err := s.Serve(context.Background(), reader, io.Discard); err == nil {
+		t.Error("want error on stream failure, got nil")
+	} else if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %v, want to contain 'boom'", err)
 	}
 }
 

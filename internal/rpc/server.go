@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"sync"
 )
 
@@ -41,6 +43,11 @@ func (s *Server) handler(method string) (Handler, bool) {
 // on a clean close, which is how the shell signals shutdown. If the stream
 // becomes unusable (e.g., due to an over-cap line), an error is returned and
 // the stream cannot be recovered.
+//
+// Context cancellation is only observed between requests: a pending read from
+// the stream will not wake up. To stop Serve, close the reader. A request that
+// is decoded after cancellation receives an internal error response before
+// Serve returns. This distinguishes cancellation from a clean close.
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	dec := NewDecoder(r)
 	enc := NewEncoder(w)
@@ -56,13 +63,24 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		case errors.Is(err, ErrParse):
 			// The ID is unknowable on a malformed line, so the response
 			// carries a null ID, as JSON-RPC 2.0 requires.
-			_ = enc.Encode(&Response{JSONRPC: Version, Error: Errorf(CodeParse, "malformed JSON")})
+			if err := enc.Encode(&Response{JSONRPC: Version, Error: Errorf(CodeParse, "malformed JSON")}); err != nil {
+				return err
+			}
 			continue
 		case err != nil:
 			return err
 		}
 
 		if ctx.Err() != nil {
+			// Reply to this request before returning.
+			reply := func(resp *Response) {
+				if !req.IsNotification() {
+					resp.JSONRPC = Version
+					resp.ID = req.ID
+					_ = enc.Encode(resp)
+				}
+			}
+			reply(&Response{Error: Errorf(CodeInternal, "server shutting down")})
 			return nil
 		}
 
@@ -75,6 +93,20 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 }
 
 func (s *Server) dispatch(ctx context.Context, enc *Encoder, req *Request) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "panic in handler %q: %v\n", req.Method, r)
+			if !req.IsNotification() {
+				resp := &Response{
+					JSONRPC: Version,
+					ID:      req.ID,
+					Error:   Errorf(CodeInternal, "internal error"),
+				}
+				_ = enc.Encode(resp)
+			}
+		}
+	}()
+
 	reply := func(resp *Response) {
 		if req.IsNotification() {
 			return
