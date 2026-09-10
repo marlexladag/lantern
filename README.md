@@ -28,13 +28,18 @@ is the plumbing that everything else will sit on:
 | `cmd/engine` | Sidecar entry point: stdio JSON-RPC server, exits on stdin EOF |
 | `internal/rpc` | JSON-RPC 2.0 wire types, newline framing, method dispatch |
 | `internal/health` | The `health` method |
+| `internal/api` | The `connections.*` and `session.*` JSON-RPC methods — the only package that knows about both the engine and the transport |
+| `internal/engine/driver` | The `Driver`/`Conn` abstraction every engine implements, plus the driver registry (`internal/engine/driver/sqlite` is the SQLite implementation) |
+| `internal/engine/schema` | The engine-neutral catalog (databases, tables, columns) every driver maps onto |
+| `internal/engine/store` | Connection persistence: settings to a JSON file, passwords to the OS keychain, never mixed |
+| `internal/engine/dberr` | The normalized driver-error type every driver maps its native failures onto |
 | `src-tauri/src/engine.rs` | Sidecar lifecycle, ID correlation, respawn backoff |
 | `src/lib/engine.ts` | Typed client for the shell's `engine_request` command |
 | `scripts/` | Sidecar cross-compilation and its tests, plus the CI validator |
 
 ## Prerequisites
 
-- **Go** 1.24+ (the version in `go.mod`; the engine is standard library only)
+- **Go** 1.24+ (the version in `go.mod`)
 - **Node** 20+
 - **Rust** stable, plus the
   [Tauri v2 system dependencies](https://tauri.app/start/prerequisites/) for
@@ -143,4 +148,8 @@ Two rules that the tests actively guard — breaking either breaks the protocol:
 1. **stdout is the JSON-RPC stream and nothing else.** A single stray
    `fmt.Println` in the engine corrupts it for the shell. Diagnostics go to
    stderr, which the shell captures into its own log.
-2. **The engine is standard library only.** No third-party Go dependencies.
+2. **Go dependencies are pure Go, not standard-library-only.** The engine has
+   two — `modernc.org/sqlite` and `github.com/zalando/go-keyring` — and both
+   are CGO-free by requirement, not accident: `CGO_ENABLED=0` cross-compiles
+   the sidecar for all six targets (`scripts/build-sidecars.sh`), and a
+   cgo-based dependency would break that. Do not add one.

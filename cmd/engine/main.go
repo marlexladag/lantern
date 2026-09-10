@@ -52,13 +52,19 @@ func main() {
 	// exit the process directly instead of trying to make Serve return on
 	// its own.
 	//
-	// Failure mode: os.Exit skips Serve's deferred wg.Wait(), so a request
-	// whose handler is actively running at the moment the signal arrives is
-	// abandoned mid-flight — its response, if any, may not reach stdout.
-	// Today's only handler (health) is synchronous and effectively
-	// instantaneous, so the window is negligible; a future long-running
-	// handler that must clean up (e.g. close a DB transaction) on shutdown
-	// would need this revisited.
+	// Failure mode: os.Exit skips every deferred cleanup in this function,
+	// Serve's own deferred wg.Wait() included, so a request whose handler is
+	// actively running at the moment the signal arrives is abandoned
+	// mid-flight — its response, if any, may not reach stdout. That handler
+	// is no longer hypothetical: session.open (internal/api/session.go)
+	// dials a real database connection and keeps it open for the life of
+	// the session, and every already-open session held in sess.conns is
+	// abandoned the same way, since main's own `defer sess.CloseAll()` below
+	// is skipped right along with everything else. This is a deliberate,
+	// already-accepted tradeoff, not an oversight — see sess.CloseAll's own
+	// comment for why: closing live SQLite handles on a signal is not worth
+	// reintroducing the shutdown hang the readiness work above removed, and
+	// the OS reclaims open file descriptors on process exit either way.
 	//
 	// Note: this goroutine is not purely a signal-path mechanism. The
 	// deferred stop() below unconditionally cancels ctx (that's how
