@@ -1,0 +1,7 @@
+# Frontend TypeScript/React sources are always text, never binary, even if a
+# file happens to contain a raw NUL byte (as src/components/Sidebar.tsx once
+# did, in a composite-key separator, before it was rewritten as the \x00
+# escape). Without this, git's content-sniffing heuristic classifies such a
+# file as binary — no diff, no blame, unreadable by a reviewer.
+*.ts diff
+*.tsx diff
