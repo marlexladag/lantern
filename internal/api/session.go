@@ -58,7 +58,28 @@ func (s *Sessions) remove(id string) (driver.Conn, bool) {
 	return c, ok
 }
 
-// CloseAll closes every live connection. The entrypoint calls this on shutdown.
+// CloseAll closes every live connection. The entrypoint calls this on
+// shutdown.
+//
+// CloseAll's own critical section (swapping in a fresh map under s.mu) is
+// safe against a concurrent add on its own terms — the two can't corrupt
+// the map. But CloseAll swapping the map out from under a session.open call
+// that is still between dial and sess.add is a real problem it does not
+// protect against: that call would go on to add its connection to the
+// *old*, already-abandoned map, and CloseAll would return having reported
+// every connection closed while one is quietly still open with nothing left
+// that can ever reach it again.
+//
+// Today that can't happen only because of an invariant enforced entirely
+// outside this type: cmd/engine's `defer sess.CloseAll()` runs only after
+// rpc.Server.Serve has returned, and Serve's own `defer wg.Wait()` (see
+// server.go) guarantees every in-flight dispatch — every handler goroutine,
+// session.open's included — has already finished by the time Serve returns.
+// So by the time CloseAll ever runs in this codebase, there is no concurrent
+// add left to race. A future caller that invokes CloseAll without that same
+// drain guarantee upstream (e.g. from a hypothetical "restart" RPC method
+// that still has other requests in flight) would silently reintroduce this
+// window; this type does nothing on its own to stop that.
 func (s *Sessions) CloseAll() {
 	s.mu.Lock()
 	conns := s.conns
@@ -117,23 +138,35 @@ func RegisterSession(srv *rpc.Server, st *store.Store, sess *Sessions) {
 		if err != nil {
 			return nil, ToRPCError(err)
 		}
-		conn, err := dial(ctx, rec, password)
+		conn, drv, err := dial(ctx, rec, password)
 		if err != nil {
 			return nil, ToRPCError(err)
 		}
+		// Closes conn on every return from here on unless keepOpen is set,
+		// which only happens once sess.add has taken ownership of it below.
+		// A plain `if err != nil { conn.Close() }` after Introspect (the
+		// brief's original shape) only closes on a normal error return: a
+		// panic inside Introspect — a driver bug, not a normal path — would
+		// unwind straight past it and leak the handle for the life of the
+		// process, since the dispatch loop's recover turns the panic into a
+		// CodeInternal response rather than crashing. defer runs during a
+		// panic's unwind, so this closes either way — the same reasoning
+		// connections.test's `defer conn.Close()` already relies on.
+		keepOpen := false
+		defer func() {
+			if !keepOpen {
+				_ = conn.Close()
+			}
+		}()
 
 		catalog, err := conn.Introspect(ctx)
 		if err != nil {
-			_ = conn.Close()
 			return nil, ToRPCError(err)
 		}
 		id := sess.add(conn)
+		keepOpen = true
 
-		caps := driver.Capabilities{}
-		if d, ok := driver.Lookup(rec.Driver); ok {
-			caps = d.Capabilities()
-		}
-		return openResult{SessionID: id, Catalog: catalog, Caps: caps}, nil
+		return openResult{SessionID: id, Catalog: catalog, Caps: drv.Capabilities()}, nil
 	})
 
 	srv.Register("session.columns", func(ctx context.Context, raw json.RawMessage) (any, error) {

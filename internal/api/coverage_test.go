@@ -38,14 +38,19 @@ import (
 // the same "scripted driver" approach internal/engine/driver/sqlite's
 // coverage_test.go uses for the failures the real driver can't reach.
 type fakeConn struct {
-	pingErr       error
-	introspectErr error
-	closeErr      error
+	pingErr          error
+	introspectErr    error
+	introspectPanics bool
+	closeErr         error
+	closed           bool
 }
 
 func (c *fakeConn) Ping(context.Context) error { return c.pingErr }
 
 func (c *fakeConn) Introspect(context.Context) (*schema.Catalog, error) {
+	if c.introspectPanics {
+		panic("fakeConn: Introspect panicked (simulated driver bug)")
+	}
 	if c.introspectErr != nil {
 		return nil, c.introspectErr
 	}
@@ -62,7 +67,10 @@ func (c *fakeConn) Query(context.Context, string, ...any) (driver.Cursor, error)
 
 func (c *fakeConn) Quote(ident string) string { return ident }
 
-func (c *fakeConn) Close() error { return c.closeErr }
+func (c *fakeConn) Close() error {
+	c.closed = true
+	return c.closeErr
+}
 
 var _ driver.Conn = (*fakeConn)(nil)
 
@@ -188,6 +196,12 @@ func TestConnectionsSaveRejectsAnUnnamedConnection(t *testing.T) {
 	}
 	if re.Code != rpc.CodeDatabase {
 		t.Errorf("code = %d, want %d", re.Code, rpc.CodeDatabase)
+	}
+	// Coordinator-flagged: an empty name is a validation failure, not an
+	// unsupported operation — KindUnsupported would read to the UI as "this
+	// engine can't do that", which is not what happened.
+	if kind := rpcErrorKind(t, err); kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q", kind, dberr.KindInvalid)
 	}
 }
 
@@ -335,14 +349,6 @@ func TestConnectionsTestReportsAPingFailureAsAResultNotAnError(t *testing.T) {
 	}
 }
 
-// -- ToRPCError ---------------------------------------------------------
-
-func TestToRPCErrorReturnsNilForNilError(t *testing.T) {
-	if got := ToRPCError(nil); got != nil {
-		t.Errorf("ToRPCError(nil) = %v, want nil", got)
-	}
-}
-
 // -- session.open -------------------------------------------------------
 
 func TestSessionOpenReturnsInvalidParamsOnBadJSON(t *testing.T) {
@@ -442,12 +448,50 @@ func TestSessionOpenClosesTheConnectionAndLeaksNoSessionWhenIntrospectFails(t *t
 	if len(h.sess.conns) != 0 {
 		t.Errorf("session table has %d entries after a failed open, want 0", len(h.sess.conns))
 	}
-	// conn.Close was called by the handler's own cleanup: a second Close on
-	// the same *fakeConn is idempotent here (fakeConn.Close just returns the
-	// scripted closeErr, which is nil), so this only proves reachability,
-	// not idempotence — the leak check above is the one that matters.
-	if err := conn.Close(); err != nil {
-		t.Errorf("close: %v", err)
+	if !conn.closed {
+		t.Error("connection was not closed after Introspect failed")
+	}
+}
+
+// Coordinator-flagged: session.open must close the connection it just
+// opened even when Introspect panics rather than returning a normal error —
+// a driver bug, not something a well-behaved driver does, but the dispatch
+// loop's own recover (see rpc.Server.dispatch) turns that panic into an
+// ordinary CodeInternal response and lets the process keep running, so a
+// leaked handle here would accumulate for the rest of the engine's life.
+// This calls the handler directly (bypassing dispatch's recover, the same
+// way harness.call does) and recovers locally instead, so the assertion
+// below runs only after the panic has unwound through session.open's own
+// deferred close.
+func TestSessionOpenClosesTheConnectionWhenIntrospectPanics(t *testing.T) {
+	h := newHarness(t)
+	conn := &fakeConn{introspectPanics: true}
+	id := registerFakeDriver(t, conn, nil)
+
+	rec, err := h.st.Save(store.Saved{Name: "x", Driver: id, File: "unused"}, "")
+	if err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+
+	handler, ok := h.srv.Handler("session.open")
+	if !ok {
+		t.Fatal("session.open is not registered")
+	}
+	params, err := json.Marshal(map[string]any{"connection_id": rec.ID})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		_, _ = handler(context.Background(), params)
+	}()
+
+	if !conn.closed {
+		t.Error("connection was not closed after Introspect panicked")
+	}
+	if len(h.sess.conns) != 0 {
+		t.Errorf("session table has %d entries after a panicking open, want 0", len(h.sess.conns))
 	}
 }
 

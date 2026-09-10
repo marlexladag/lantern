@@ -23,7 +23,12 @@ const (
 	KindCanceled    Kind = "canceled"
 	KindNotFound    Kind = "not_found"
 	KindUnsupported Kind = "unsupported"
-	KindUnknown     Kind = "unknown"
+	// KindInvalid is user-input validation, distinct from KindUnsupported:
+	// unsupported means "this engine can't do that"; invalid means "what you
+	// typed doesn't qualify", which the UI should render differently (spec
+	// section 11 — the UI branches on Kind).
+	KindInvalid Kind = "invalid"
+	KindUnknown Kind = "unknown"
 )
 
 // Error is a driver failure in engine-neutral terms.

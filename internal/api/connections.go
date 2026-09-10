@@ -43,7 +43,7 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 			return nil, rpc.Errorf(rpc.CodeInvalidParams, "connections.save: "+err.Error())
 		}
 		if p.Connection.Name == "" {
-			return nil, ToRPCError(dberr.New(dberr.KindUnsupported, "a connection needs a name"))
+			return nil, ToRPCError(dberr.New(dberr.KindInvalid, "a connection needs a name"))
 		}
 		saved, err := st.Save(p.Connection, p.Password)
 		if err != nil {
@@ -68,7 +68,7 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, rpc.Errorf(rpc.CodeInvalidParams, "connections.test: "+err.Error())
 		}
-		conn, err := dial(ctx, p.Connection, p.Password)
+		conn, _, err := dial(ctx, p.Connection, p.Password)
 		if err != nil {
 			e := dberr.From(err)
 			return testResult{OK: false, Kind: string(e.Kind), Error: e.Message}, nil
@@ -82,11 +82,19 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 	})
 }
 
-// dial resolves the driver and opens a connection.
-func dial(ctx context.Context, rec store.Saved, password string) (driver.Conn, error) {
+// dial resolves the driver and opens a connection, returning the resolved
+// Driver alongside the Conn. Callers that need driver-level information
+// after a successful dial (session.open's Capabilities, for one) use the
+// value handed back here instead of looking the driver up a second time:
+// with only one lookup, there is no way for the two to disagree.
+func dial(ctx context.Context, rec store.Saved, password string) (driver.Conn, driver.Driver, error) {
 	d, ok := driver.Lookup(rec.Driver)
 	if !ok {
-		return nil, dberr.New(dberr.KindUnsupported, "no driver named "+rec.Driver)
+		return nil, nil, dberr.New(dberr.KindUnsupported, "no driver named "+rec.Driver)
 	}
-	return d.Open(ctx, rec.ConnConfig(password))
+	conn, err := d.Open(ctx, rec.ConnConfig(password))
+	if err != nil {
+		return nil, nil, err
+	}
+	return conn, d, nil
 }
