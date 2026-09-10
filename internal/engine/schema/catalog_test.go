@@ -82,8 +82,24 @@ func TestJSONFieldNames(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
+	// Length guards run before any indexing below, so a renamed container
+	// tag (databases, tables, or columns) fails here with a message naming
+	// the tag, rather than surfacing as an index-out-of-range panic further
+	// down the function.
+	if len(raw.Databases) == 0 {
+		t.Fatal("databases tag: expected at least 1 database, got 0")
+	}
+	db := raw.Databases[0]
+	if len(db.Tables) == 0 {
+		t.Fatal("tables tag: expected at least 1 table, got 0")
+	}
+	tbl := db.Tables[0]
+	if len(tbl.Columns) == 0 {
+		t.Fatal("columns tag: expected at least 1 column, got 0")
+	}
+
 	// Assert all Column tags
-	col := raw.Databases[0].Tables[0].Columns[0]
+	col := tbl.Columns[0]
 	if col.Name != "id" {
 		t.Errorf("name did not round trip: want id, got %s", col.Name)
 	}
@@ -101,17 +117,9 @@ func TestJSONFieldNames(t *testing.T) {
 	}
 
 	// Assert Database and Table tags
-	if len(raw.Databases) == 0 {
-		t.Fatal("databases tag: expected at least 1 database, got 0")
-	}
-	db := raw.Databases[0]
-	if len(db.Tables) == 0 {
-		t.Fatal("tables tag: expected at least 1 table, got 0")
-	}
 	if db.Name != "main" {
 		t.Errorf("database name did not round trip: want main, got %s", db.Name)
 	}
-	tbl := raw.Databases[0].Tables[0]
 	if tbl.Name != "users" {
 		t.Errorf("table name did not round trip: want users, got %s", tbl.Name)
 	}
