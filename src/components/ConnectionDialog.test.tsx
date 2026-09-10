@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 
@@ -47,6 +48,111 @@ it('renders nothing when closed', () => {
 it('moves focus to the Name field when it opens', () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
   expect(document.activeElement).toBe(screen.getByLabelText(/name/i));
+});
+
+// A focus trap keeps Tab inside the dialog — without it, Tab from the last
+// control escapes into the sidebar behind the (still open) dialog.
+it('wraps Tab from the last focusable control to the first', () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  const dialog = screen.getByRole('dialog');
+  const first = screen.getByRole('button', { name: /close/i });
+  const last = screen.getByRole('button', { name: /^connect$/i });
+
+  last.focus();
+  fireEvent.keyDown(dialog, { key: 'Tab' });
+
+  expect(document.activeElement).toBe(first);
+});
+
+it('wraps Shift+Tab from the first focusable control to the last', () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  const dialog = screen.getByRole('dialog');
+  const first = screen.getByRole('button', { name: /close/i });
+  const last = screen.getByRole('button', { name: /^connect$/i });
+
+  first.focus();
+  fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+
+  expect(document.activeElement).toBe(last);
+});
+
+it('leaves a forward Tab alone when focus is not on the last control', () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  const dialog = screen.getByRole('dialog');
+  const nameField = screen.getByLabelText(/name/i);
+
+  nameField.focus();
+  fireEvent.keyDown(dialog, { key: 'Tab' });
+
+  // jsdom does not itself implement tab order, so an untrapped Tab leaves
+  // focus exactly where it was — the trap only ever acts at the boundary.
+  expect(document.activeElement).toBe(nameField);
+});
+
+it('leaves a backward Shift+Tab alone when focus is not on the first control', () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  const dialog = screen.getByRole('dialog');
+  const nameField = screen.getByLabelText(/name/i);
+
+  nameField.focus();
+  fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+
+  expect(document.activeElement).toBe(nameField);
+});
+
+// Harness matching how App.tsx actually wires the dialog up: a real
+// trigger button, real open/close state. Focus restoration is tested here
+// rather than against App's own suite (which stubs ConnectionDialog out)
+// so it exercises the dialog's real close paths.
+function AddConnectionHarness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Add connection
+      </button>
+      <ConnectionDialog open={open} onClose={() => setOpen(false)} onSaved={() => setOpen(false)} />
+    </>
+  );
+}
+
+it('returns focus to the element that opened the dialog after Escape, Cancel, or the close button', () => {
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  // Escape, Cancel, and the × button — three different close paths, one
+  // shared restore-focus effect.
+  const closeActions: Array<() => void> = [
+    () => fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' }),
+    () => fireEvent.click(screen.getByRole('button', { name: /^cancel$/i })),
+    () => fireEvent.click(screen.getByRole('button', { name: /close/i })),
+  ];
+
+  for (const close of closeActions) {
+    opener.focus();
+    fireEvent.click(opener);
+    expect(document.activeElement).toBe(screen.getByLabelText(/name/i));
+
+    close();
+    expect(document.activeElement).toBe(opener);
+  }
+});
+
+it('returns focus to the element that opened the dialog after a successful save', async () => {
+  const stored = { id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db', color: '#3d7d55', read_only: false };
+  saveMock.mockResolvedValue(stored);
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  opener.focus();
+  fireEvent.click(opener);
+  fill('local', '/tmp/a.db');
+
+  await act(async () => {
+    screen.getByRole('button', { name: /^connect$/i }).click();
+  });
+
+  await waitFor(() => expect(document.activeElement).toBe(opener));
 });
 
 it('reports a successful test inline', async () => {

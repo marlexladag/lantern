@@ -24,6 +24,14 @@ const DANGER_COLOR = '#9e4436';
 // `missingDriverField` both read from.
 const DRIVER = 'sqlite' as const;
 
+// Every control a keyboard user can land on inside the dialog, in DOM
+// order — the segmented MySQL/MariaDB buttons are disabled and therefore
+// excluded automatically. Used both to seed focus on open and to trap Tab
+// at the two ends so it wraps within the dialog instead of escaping into
+// the sidebar behind it.
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 type TestStatus = { kind: 'ok' } | { kind: 'error'; message: string } | null;
 
 export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogProps) {
@@ -36,15 +44,40 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  // The element focused right before the dialog opened — restored on every
+  // close path (Escape, Cancel, ×, or a successful save all funnel through
+  // `open` going back to false) so a keyboard user lands back where they
+  // were instead of at <body>.
+  const openerRef = useRef<HTMLElement | null>(null);
 
-  // Nothing else moves focus into a modal that just appeared: without this,
-  // Tab from wherever the trigger button was would walk into the sidebar
-  // behind the dialog before ever reaching the dialog's own controls.
   useEffect(() => {
-    if (open) nameInputRef.current?.focus();
+    if (open) {
+      // A type-only narrowing, not a runtime check: `document.activeElement`
+      // is always at least `document.body` in a mounted document, and
+      // nothing in this app ever focuses a non-HTML element, so there is no
+      // reachable "it wasn't an HTMLElement" case to branch on.
+      openerRef.current = document.activeElement as HTMLElement | null;
+      // Nothing else moves focus into a modal that just appeared: without
+      // this, Tab from wherever the trigger button was would walk into the
+      // sidebar behind the dialog before ever reaching the dialog's own
+      // controls.
+      nameInputRef.current?.focus();
+    } else {
+      openerRef.current?.focus();
+      openerRef.current = null;
+    }
   }, [open]);
 
   if (!open) return null;
+
+  // No not-found branch: `handleKeyDown` only ever fires from a keydown
+  // already dispatched on the rendered dialog element, so `dialogRef` is
+  // always attached by the time this runs — the same reasoning Sidebar's
+  // roving tabIndex uses for `rows` never being empty in its own handler.
+  function focusableElements(): HTMLElement[] {
+    return Array.from(dialogRef.current!.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+  }
 
   function buildConnection(): NewConnection {
     return {
@@ -146,6 +179,23 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void handleConnect();
+      return;
+    }
+    if (e.key === 'Tab') {
+      const focusable = focusableElements();
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      // Only the two boundaries are trapped — every other Tab/Shift+Tab is
+      // left to the browser's normal focus order within the dialog.
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     }
   }
 
@@ -157,6 +207,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
         aria-modal="true"
         aria-labelledby="connection-dialog-title"
         onKeyDown={handleKeyDown}
+        ref={dialogRef}
       >
         <div className="dialog-header">
           <b id="connection-dialog-title" className="dialog-title">
