@@ -128,8 +128,14 @@ for script in sorted(scripts.keys()):
     print(script)
 ")
 
-# npm built-in commands that don't require package.json entries
-NPM_BUILTINS="ci install audit dedupe diff exec pkg pack publish run start stop test uninstall update view"
+# npm built-in commands that don't require package.json entries.
+# NOTE: 'test', 'start', 'stop', and 'restart' are deliberately excluded even
+# though npm has default no-op behavior for them. Every project that actually
+# relies on `npm test` etc. in CI defines a real script for it (this repo
+# does: "test": "vitest run") — treating them as unconditionally safe would
+# let someone delete the real script and have CI keep reporting success
+# while silently running nothing.
+NPM_BUILTINS="ci install audit dedupe diff exec pkg pack publish run uninstall update view"
 
 if [[ -z "$NPM_SCRIPTS" ]]; then
     pass "No npm scripts referenced in workflow"
@@ -150,79 +156,75 @@ else
 fi
 
 # Check 5: Go version compatibility across all setup-go steps
+#
+# Only a literal `go-version` key is treated as verifiable: its value is
+# compared against the `go` directive in go.mod. Any setup-go step that
+# specifies its version another way (go-version-file, or no version key at
+# all) is a check this validator cannot evaluate — and an unevaluated check
+# must never be reported as passing. It fails loudly instead, naming the
+# job and step, rather than silently skipping or reporting success. This
+# also means a workflow with zero setup-go steps fails this check (there is
+# a go.mod in this repo, so CI must actually verify a Go toolchain version
+# against it) instead of quietly passing because there was nothing to look at.
 echo
 echo "Checking Go version compatibility..."
 GO_MOD_FILE="$REPO_ROOT/go.mod"
-GO_VERSION_MOD=""
-if [[ -f "$GO_MOD_FILE" ]]; then
-    GO_VERSION_MOD=$(grep '^go ' "$GO_MOD_FILE" | awk '{print $2}')
+if [[ ! -f "$GO_MOD_FILE" ]]; then
+    fail "go.mod not found: cannot verify workflow Go version against project requirement"
+fi
+GO_VERSION_MOD=$(grep '^go ' "$GO_MOD_FILE" | awk '{print $2}')
+if [[ -z "$GO_VERSION_MOD" ]]; then
+    fail "Could not extract a 'go' directive from go.mod"
 fi
 
-# Collect ALL setup-go steps from all jobs
-GO_VERSIONS=$(python3 -c "
+# One line per actions/setup-go step found, across every job:
+#   job:step_idx:version:<value>        -- literal go-version, comparable
+#   job:step_idx:unverifiable:<reason>  -- version not directly comparable
+GO_STEPS=$(python3 -c "
 import yaml
-import sys
 
 with open('$WORKFLOW_FILE') as f:
     workflow = yaml.safe_load(f)
 
-# For each job, find all setup-go steps
 for job_name, job in workflow.get('jobs', {}).items():
     for step_idx, step in enumerate(job.get('steps', [])):
         if step.get('uses', '').startswith('actions/setup-go'):
-            with_config = step.get('with', {})
-            # Check for different ways to specify Go version
-            if 'go-version' in with_config:
-                version = with_config['go-version'].lstrip('v')
+            with_config = step.get('with', {}) or {}
+            if 'go-version' in with_config and str(with_config['go-version']).strip():
+                version = str(with_config['go-version']).strip().lstrip('v')
                 print(f'{job_name}:{step_idx}:version:{version}')
             elif 'go-version-file' in with_config:
-                # go-version-file is a valid alternative
                 file_path = with_config['go-version-file']
-                print(f'{job_name}:{step_idx}:go-version-file:{file_path}')
+                print(f'{job_name}:{step_idx}:unverifiable:uses go-version-file ({file_path}) instead of a literal go-version; this validator has no logic to resolve that file, so it cannot confirm the CI Go toolchain matches go.mod')
             else:
-                # No recognized version specification found
-                print(f'{job_name}:{step_idx}:UNKNOWN')
+                print(f'{job_name}:{step_idx}:unverifiable:no go-version key found on this setup-go step')
 ")
 
-if [[ -z "$GO_VERSIONS" ]]; then
-    echo "  (No setup-go steps found; skipping Go version check)"
-else
-    # Track if we found any Go version to verify
-    FOUND_ANY_VERSION=false
-    GO_CHECK_FAILED=false
-
-    while IFS=':' read -r job_name step_idx version_type version_value; do
-        if [[ "$version_type" == "version" ]]; then
-            FOUND_ANY_VERSION=true
-
-            if [[ -n "$GO_VERSION_MOD" ]]; then
-                # Compare versions (simple numeric comparison for X.Y format)
-                WF_MAJOR=$(echo "$version_value" | cut -d. -f1)
-                WF_MINOR=$(echo "$version_value" | cut -d. -f2)
-                MOD_MAJOR=$(echo "$GO_VERSION_MOD" | cut -d. -f1)
-                MOD_MINOR=$(echo "$GO_VERSION_MOD" | cut -d. -f2)
-
-                WF_NUM=$((WF_MAJOR * 1000 + WF_MINOR))
-                MOD_NUM=$((MOD_MAJOR * 1000 + MOD_MINOR))
-
-                if [[ $WF_NUM -lt $MOD_NUM ]]; then
-                    fail "Go version in job '$job_name' step $step_idx ($version_value) is older than go.mod requires ($GO_VERSION_MOD)"
-                fi
-                echo "  ✓ $job_name: Go $version_value (matches go.mod requirement)"
-            else
-                echo "  ✓ $job_name: Go $version_value (go.mod not found to verify)"
-            fi
-        elif [[ "$version_type" == "go-version-file" ]]; then
-            echo "  ✓ $job_name: step $step_idx uses go-version-file ($version_value) — cannot verify without reading file"
-        elif [[ "$version_type" == "UNKNOWN" ]]; then
-            fail "setup-go step in job '$job_name' (step $step_idx) does not specify go-version or go-version-file. Cannot determine Go version requirement."
-        fi
-    done <<< "$GO_VERSIONS"
-
-    if [[ "$FOUND_ANY_VERSION" == true ]]; then
-        pass "Go version compatibility verified"
-    fi
+if [[ -z "$GO_STEPS" ]]; then
+    fail "No actions/setup-go steps found in the workflow; cannot verify the CI Go toolchain matches go.mod (go $GO_VERSION_MOD)"
 fi
+
+# Compare only major.minor so a patch component on either side (e.g. go.mod's
+# 'go 1.23.1' vs a workflow pin of '1.23') doesn't cause a false mismatch,
+# while a genuine drift like '1.23' vs '1.99' is still caught.
+normalize_go_version() {
+    echo "$1" | awk -F. '{print $1"."$2}'
+}
+NORM_MOD=$(normalize_go_version "$GO_VERSION_MOD")
+
+while IFS=':' read -r job_name step_idx kind detail; do
+    if [[ "$kind" == "version" ]]; then
+        NORM_WF=$(normalize_go_version "$detail")
+        if [[ "$NORM_WF" != "$NORM_MOD" ]]; then
+            fail "Go version in job '$job_name' step $step_idx ($detail) does not match go.mod ($GO_VERSION_MOD)"
+        fi
+        echo "  ✓ $job_name step $step_idx: Go $detail (matches go.mod)"
+    else
+        fail "Go version in job '$job_name' step $step_idx is unverifiable: $detail"
+    fi
+done <<< "$GO_STEPS"
+
+pass "Go version compatibility verified for all setup-go steps"
 
 # Check 6: Verify paths referenced in the workflow
 echo
