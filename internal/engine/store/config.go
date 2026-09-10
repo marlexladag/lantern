@@ -150,6 +150,26 @@ func (s *Store) writeLocked(records []Saved) error {
 	return nil
 }
 
+// snapshotSecret captures whatever is currently filed under id in the
+// keychain, three ways: existed (with its value), confirmed absent, or
+// undeterminable (the keyring itself failed to answer). Both Save and
+// Delete call this immediately before mutating the keychain, so a later
+// config-write failure can restore exactly this prior state rather than
+// guessing at what belongs there.
+func (s *Store) snapshotSecret(id string) (known, exists bool, secret string) {
+	switch prior, err := s.keyring.Get(keyringService, id); {
+	case err == nil:
+		return true, true, prior
+	case errors.Is(err, ErrSecretNotFound):
+		return true, false, ""
+	default:
+		// Couldn't determine what, if anything, was there before — known
+		// stays false, and the caller's rollback leaves the keychain alone
+		// rather than guess.
+		return false, false, ""
+	}
+}
+
 // Save stores a connection, assigning an ID when it has none, and files the
 // password in the keychain. An empty password stores nothing.
 func (s *Store) Save(c Saved, password string) (Saved, error) {
@@ -192,16 +212,7 @@ func (s *Store) Save(c Saved, password string) (Saved, error) {
 		priorSecret string
 	)
 	if password != "" {
-		switch prior, err := s.keyring.Get(keyringService, c.ID); {
-		case err == nil:
-			priorKnown, priorExists, priorSecret = true, true, prior
-		case errors.Is(err, ErrSecretNotFound):
-			priorKnown, priorExists = true, false
-		default:
-			// Couldn't determine what, if anything, was there before —
-			// priorKnown stays false, and the rollback below leaves the
-			// keychain alone rather than guess.
-		}
+		priorKnown, priorExists, priorSecret = s.snapshotSecret(c.ID)
 
 		if err := s.keyring.Set(keyringService, c.ID, password); err != nil {
 			return Saved{}, dberr.Wrap(dberr.KindUnknown, "cannot store the password in the keychain", err)
@@ -238,6 +249,19 @@ func (s *Store) Save(c Saved, password string) (Saved, error) {
 }
 
 // Delete removes a connection and its stored password.
+//
+// Coordinator-flagged: this used to remove the secret and then write the
+// config, unconditionally — the same drift ruled Critical for Save (see
+// Save's own priorKnown/priorExists/priorSecret above) and fixed there. A
+// write failure right after a successful keychain delete left the record
+// still listed, with its password silently gone: a merely recoverable
+// annoyance (the delete didn't really take) turned into permanent loss.
+// Delete now applies the exact same state-restoring rollback Save does —
+// capture whatever secret existed before deleting it, and restore exactly
+// that on a write failure — rather than reordering to write-config-then-
+// delete-secret, which would trade this for a worse residue: an orphaned
+// secret left behind in the keychain under a connection nothing references
+// any more.
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,12 +282,33 @@ func (s *Store) Delete(id string) error {
 	if !found {
 		return dberr.New(dberr.KindNotFound, "no connection with id "+id)
 	}
+
+	priorKnown, priorExists, priorSecret := s.snapshotSecret(id)
+
 	// A deleted connection must not leave its password in the keychain. A
 	// missing secret is fine — not every connection has one.
 	if err := s.keyring.Delete(keyringService, id); err != nil && !errors.Is(err, ErrSecretNotFound) {
 		return dberr.Wrap(dberr.KindUnknown, "cannot remove the password from the keychain", err)
 	}
-	return s.writeLocked(out)
+	if err := s.writeLocked(out); err != nil {
+		// The keychain delete already went through (or the secret was
+		// already absent) but the config write didn't, so without this the
+		// record would stay listed with its password silently gone. Ignore
+		// any failure from the rollback itself — we're already returning
+		// the original write error, and a failed rollback must not mask it.
+		if priorKnown && priorExists {
+			_ = s.keyring.Set(keyringService, id, priorSecret)
+		}
+		// priorKnown && !priorExists: nothing existed before, so there is
+		// nothing to restore — the secret staying absent is already
+		// correct, and guessing would mean filing an empty-string secret
+		// where none belongs.
+		// !priorKnown: couldn't prove what belonged there before Delete
+		// ran. Losing a secret is worse than leaving it deleted on a guess,
+		// so the keychain stays exactly as Delete left it.
+		return err
+	}
+	return nil
 }
 
 // Password returns the stored password, or an empty string when there is none.

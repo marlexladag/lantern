@@ -534,6 +534,86 @@ func TestDeleteFailsWhenTheKeyringCannotRemoveTheSecret(t *testing.T) {
 	}
 }
 
+// Coordinator-flagged Critical, the same drift already ruled Critical for
+// Save (see TestSaveRemovesTheJustStoredSecretWhenTheConfigCannotBeWritten
+// and TestSaveRestoresThePriorSecretWhenAnUpdateWriteFails above): Delete
+// removed the secret and then wrote the config, so a write failure right
+// after a successful keychain delete left the record still listed with its
+// password silently gone — a "recoverable annoyance" (the delete didn't
+// really happen) turned into permanent data loss (the password is gone
+// either way). Delete now captures whatever secret existed before deleting
+// it and restores exactly that value when the config write fails, the same
+// state-restoring approach Save already uses.
+func TestDeleteRestoresTheSecretWhenTheConfigCannotBeWritten(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	kr := NewMemoryKeyring()
+	s := New(path, kr)
+
+	const id = "delete-rollback-id"
+	const secret = "still-needed-secret"
+	if _, err := s.Save(Saved{ID: id, Name: "prod", Driver: "mysql", User: "app"}, secret); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if err := s.Delete(id); err == nil {
+		t.Fatal("Delete succeeded despite an unwritable config directory")
+	}
+
+	got, err := kr.Get(keyringService, id)
+	if err != nil {
+		t.Fatalf("get after a failed delete: %v", err)
+	}
+	if got != secret {
+		t.Errorf("secret = %q, want the original %q to survive a failed delete", got, secret)
+	}
+}
+
+// noSetKeyring fails the test outright if Set is ever called — a stronger
+// check than merely asserting the secret is still absent afterward, which a
+// wrongly-attempted "restore" of nothing (Set-ing an empty string) would
+// also make true.
+type noSetKeyring struct{ Keyring }
+
+func (k noSetKeyring) Set(service, user, secret string) error {
+	panic("Set must not be called restoring a connection that never had a secret")
+}
+
+// Required adversarial case, confirmed-absent: deleting a connection that
+// never had a password must not attempt a restore at all when the config
+// write then fails — there is nothing to restore, and guessing would mean
+// filing an empty-string secret where none belongs.
+func TestDeleteOfAConnectionWithNoSecretNeverAttemptsARestoreWhenTheWriteFails(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	s := New(path, noSetKeyring{Keyring: NewMemoryKeyring()})
+
+	const id = "no-secret-id"
+	if _, err := s.Save(Saved{ID: id, Name: "local", Driver: "sqlite", File: "/tmp/a.db"}, ""); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if err := s.Delete(id); err == nil {
+		t.Fatal("Delete succeeded despite an unwritable config directory")
+	}
+	// noSetKeyring's Set would have panicked the test if Delete's rollback
+	// had called it — reaching here means it did not.
+}
+
 // -- Password error path ---------------------------------------------------
 
 func TestPasswordFailsWhenTheKeyringErrors(t *testing.T) {
