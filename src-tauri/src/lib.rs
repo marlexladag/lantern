@@ -10,7 +10,24 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let eng = engine::Engine::new(app.handle().clone());
-            eng.spawn()?;
+            // Deliberately NOT `eng.spawn()?`. Propagating here reaches
+            // build()'s .expect(...) and aborts the process before a window
+            // exists - and on a Windows release build, where
+            // `windows_subsystem = "windows"` means there is no console,
+            // that panic prints to nothing at all: the user's entire
+            // diagnostic is "the app doesn't open".
+            //
+            // The likeliest cause of a first-spawn failure is also the one
+            // that most needs explaining: a missing, corrupt, or
+            // wrong-architecture sidecar in a fresh install. The UI already
+            // has a terminal `down` state built for every *other* failure
+            // path, so route this one into it too. mark_down records the
+            // reason, which the next `engine_request` returns instead of a
+            // bare "engine is not running" - so the window opens and says
+            // what is wrong.
+            if let Err(e) = eng.spawn() {
+                eng.mark_down(format!("initial spawn failed: {e}"));
+            }
             app.manage(eng);
             Ok(())
         })
