@@ -20,8 +20,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/zalando/go-keyring"
 )
 
@@ -263,6 +265,62 @@ func TestSaveFailsWhenTheKeyringCannotStoreThePassword(t *testing.T) {
 
 	if _, err := s.Save(Saved{Name: "prod", Driver: "mysql", User: "app"}, "hunter2"); err == nil {
 		t.Fatal("Save succeeded despite the keyring refusing to store the password")
+	}
+}
+
+// Coordinator-flagged fix: Save writes the keychain secret before the config
+// file, so a config-write failure right after a successful keychain write
+// must not leave the two stores drifted apart — an orphaned secret filed
+// under an ID the config file never actually records. Save now rolls that
+// back with a best-effort delete.
+func TestSaveRemovesTheJustStoredSecretWhenTheConfigCannotBeWritten(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	kr := NewMemoryKeyring()
+	s := New(path, kr)
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	// c.ID is set explicitly (rather than left empty for newID to fill in)
+	// so the test knows which key to check in the keyring afterward — Save
+	// returns a zero-value Saved on this error path, not the id it assigned.
+	const id = "rollback-test-id"
+	if _, err := s.Save(Saved{ID: id, Name: "prod", Driver: "mysql", User: "app"}, "hunter2"); err == nil {
+		t.Fatal("Save succeeded despite an unwritable config directory")
+	}
+
+	if _, err := kr.Get(keyringService, id); !errors.Is(err, ErrSecretNotFound) {
+		t.Errorf("secret survived a failed save: err = %v", err)
+	}
+}
+
+// The rollback delete's own failure must not replace the original
+// write-failure error — that would hide the real problem behind a secondary
+// one the caller never asked about.
+func TestSaveKeepsTheOriginalErrorWhenTheRollbackDeleteAlsoFails(t *testing.T) {
+	skipIfRoot(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "connections.json")
+	s := New(path, erroringKeyring{deleteErr: errors.New("keychain also unavailable")})
+
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod config dir read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	_, err := s.Save(Saved{ID: "x", Name: "prod", Driver: "mysql", User: "app"}, "hunter2")
+	if err == nil {
+		t.Fatal("Save succeeded despite an unwritable config directory")
+	}
+	got := dberr.From(err)
+	if !strings.Contains(got.Message, "cannot write the connection file") {
+		t.Errorf("err = %+v, want the original config-write failure, not the rollback failure", got)
 	}
 }
 

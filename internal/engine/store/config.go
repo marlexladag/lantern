@@ -100,11 +100,16 @@ func (s *Store) writeLocked(records []Saved) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return dberr.Wrap(dberr.KindUnknown, "cannot create the config directory", err)
 	}
-	// json.MarshalIndent cannot fail for a []Saved: every field is a plain
-	// string, int or bool, none of which json ever refuses to encode (and a
-	// nil/empty slice marshals to "[]", not an error). There is deliberately
-	// no error check here — one would be untestable dead code, the same
-	// reasoning the sqlite driver's classify nil-guard was removed under.
+	// json.MarshalIndent cannot fail for a []Saved, on any Go version: per
+	// encoding/json's own source (encode.go), Marshal only ever fails with
+	// UnsupportedValueError (NaN/Inf floats, or a cycle reachable through a
+	// pointer/interface/map) or UnsupportedTypeError (chan, func, complex).
+	// Saved's fields are exclusively string, int and bool — none of those
+	// categories — so unlike newID's crypto/rand.Read check below, this
+	// isn't a version-dependent guarantee, it's unconditional. There is
+	// deliberately no error check here — one would be untestable dead code,
+	// the same reasoning the sqlite driver's classify nil-guard was removed
+	// under.
 	raw, _ := json.MarshalIndent(records, "", "  ")
 	// Write to a sibling and rename, so an interrupted write cannot leave a
 	// half-written connection list behind. Clean up the temp file on every
@@ -150,12 +155,23 @@ func (s *Store) Save(c Saved, password string) (Saved, error) {
 		}
 	}
 
+	secretStored := false
 	if password != "" {
 		if err := s.keyring.Set(keyringService, c.ID, password); err != nil {
 			return Saved{}, dberr.Wrap(dberr.KindUnknown, "cannot store the password in the keychain", err)
 		}
+		secretStored = true
 	}
 	if err := s.writeLocked(records); err != nil {
+		if secretStored {
+			// The keychain write already succeeded but the config write
+			// didn't, so without this the two stores would drift apart: a
+			// secret filed under an ID the config file never actually
+			// records. Best-effort clean it back up. Ignore any failure
+			// from this — we're already returning the original write
+			// error, and a failed rollback must not mask it.
+			_ = s.keyring.Delete(keyringService, c.ID)
+		}
 		return Saved{}, err
 	}
 	return c, nil
@@ -204,12 +220,16 @@ func (s *Store) Password(id string) (string, error) {
 
 func newID() string {
 	b := make([]byte, 8)
-	// crypto/rand.Read never returns an error: per its own documentation
-	// (and $GOROOT/src/crypto/rand/rand.go's fatal() call), it crashes the
-	// program irrecoverably instead if the OS entropy source ever fails.
-	// There is deliberately no error branch here to check — one would be
-	// untestable dead code, the same reasoning writeLocked's
-	// json.MarshalIndent error check was removed under.
+	// As of Go 1.24 (see the crypto/rand.Read doc comment, and the release
+	// notes for https://go.dev/issue/66821), Read is guaranteed never to
+	// return an error: it crashes the program irrecoverably instead if the
+	// OS entropy source ever fails. go.mod's floor is 1.24 specifically so
+	// this guarantee holds for every build of this module — under Go 1.23,
+	// Read could still return an error here, which this function would then
+	// have silently ignored. There is deliberately no error branch to check
+	// on the declared floor: one would be untestable dead code, the same
+	// reasoning writeLocked's json.MarshalIndent error check was removed
+	// under.
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
