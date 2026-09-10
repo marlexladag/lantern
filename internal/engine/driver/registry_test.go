@@ -10,8 +10,9 @@ import (
 
 type stubDriver struct{ id string }
 
-func (s stubDriver) ID() string                 { return s.id }
-func (s stubDriver) Capabilities() Capabilities { return Capabilities{} }
+func (s stubDriver) ID() string                         { return s.id }
+func (s stubDriver) Capabilities() Capabilities         { return Capabilities{} }
+func (s stubDriver) RequiredFields(ConnConfig) []string { return nil }
 func (s stubDriver) Open(context.Context, ConnConfig) (Conn, error) {
 	return nil, nil
 }

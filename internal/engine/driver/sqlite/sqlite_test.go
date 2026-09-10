@@ -222,3 +222,22 @@ func TestDriverIsRegisteredAndDeclaresCapabilities(t *testing.T) {
 		t.Error("SQLite declared no transaction support")
 	}
 }
+
+// Coordinator-flagged: a connection with no File used to save successfully
+// and only fail much later, at Open, with a confusing "no database file
+// given". RequiredFields is what lets connections.save catch this before
+// the record is ever persisted.
+func TestRequiredFieldsNamesFileWhenMissing(t *testing.T) {
+	got := New().RequiredFields(driver.ConnConfig{Driver: "sqlite"})
+	want := []string{"file"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("RequiredFields(no file) = %v, want %v", got, want)
+	}
+}
+
+func TestRequiredFieldsIsSatisfiedWhenFileIsSet(t *testing.T) {
+	got := New().RequiredFields(driver.ConnConfig{Driver: "sqlite", File: "/tmp/x.db"})
+	if len(got) != 0 {
+		t.Errorf("RequiredFields(file set) = %v, want none", got)
+	}
+}

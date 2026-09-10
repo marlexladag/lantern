@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -83,6 +84,12 @@ type fakeDriver struct {
 
 func (d fakeDriver) ID() string                        { return d.id }
 func (d fakeDriver) Capabilities() driver.Capabilities { return driver.Capabilities{} }
+
+// RequiredFields: none. The tests that use fakeDriver exercise dialing and
+// session behaviour, not connections.save's field validation — that has its
+// own tests, against the real sqlite driver's own RequiredFields.
+func (d fakeDriver) RequiredFields(driver.ConnConfig) []string { return nil }
+
 func (d fakeDriver) Open(context.Context, driver.ConnConfig) (driver.Conn, error) {
 	if d.openErr != nil {
 		return nil, d.openErr
@@ -202,6 +209,74 @@ func TestConnectionsSaveRejectsAnUnnamedConnection(t *testing.T) {
 	// engine can't do that", which is not what happened.
 	if kind := rpcErrorKind(t, err); kind != dberr.KindInvalid {
 		t.Errorf("kind = %q, want %q", kind, dberr.KindInvalid)
+	}
+}
+
+// User-found: a SQLite connection with no File saved successfully and only
+// failed later, in the sidebar, as a confusing "no database file given" once
+// something finally tried to open it. connections.save must reject this
+// before the record is ever persisted, naming the field that is missing.
+func TestConnectionsSaveRejectsAFilelessSqliteConnection(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.call(t, "connections.save", map[string]any{
+		"connection": map[string]any{"name": "x", "driver": "sqlite"},
+		"password":   "",
+	})
+	if err == nil {
+		t.Fatal("connections.save succeeded with no file")
+	}
+	var re *rpc.Error
+	if !asRPCError(err, &re) {
+		t.Fatalf("err = %T, want *rpc.Error", err)
+	}
+	if re.Code != rpc.CodeDatabase {
+		t.Errorf("code = %d, want %d", re.Code, rpc.CodeDatabase)
+	}
+	if kind := rpcErrorKind(t, err); kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q", kind, dberr.KindInvalid)
+	}
+	var payload dberr.Error
+	if err := json.Unmarshal(re.Data, &payload); err != nil {
+		t.Fatalf("data is not a dberr.Error: %v", err)
+	}
+	if !strings.Contains(payload.Message, "File") {
+		t.Errorf("message = %q, want it to name File", payload.Message)
+	}
+
+	// The point of rejecting at save is that nothing was persisted to find
+	// and delete later.
+	listed, err := h.call(t, "connections.list", nil)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var records []store.Saved
+	if err := json.Unmarshal(listed, &records); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("list = %+v, want no records saved", records)
+	}
+}
+
+// The required-fields check is scoped to drivers the engine actually knows
+// about — dial's own KindUnsupported is what reports an unregistered driver,
+// at open time, same as before this change. Field validation for a driver
+// that does not exist yet has nothing to check against.
+func TestConnectionsSaveDoesNotValidateFieldsForAnUnregisteredDriver(t *testing.T) {
+	h := newHarness(t)
+	saved, err := h.call(t, "connections.save", map[string]any{
+		"connection": map[string]any{"name": "future", "driver": "mysql"},
+		"password":   "",
+	})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	var rec store.Saved
+	if err := json.Unmarshal(saved, &rec); err != nil {
+		t.Fatalf("decode saved: %v", err)
+	}
+	if rec.ID == "" {
+		t.Fatal("save returned no id")
 	}
 }
 

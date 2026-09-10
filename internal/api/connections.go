@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
@@ -45,6 +46,9 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 		if p.Connection.Name == "" {
 			return nil, ToRPCError(dberr.New(dberr.KindInvalid, "a connection needs a name"))
 		}
+		if err := checkRequiredFields(p.Connection); err != nil {
+			return nil, ToRPCError(err)
+		}
 		saved, err := st.Save(p.Connection, p.Password)
 		if err != nil {
 			return nil, ToRPCError(err)
@@ -80,6 +84,33 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 		}
 		return testResult{OK: true}, nil
 	})
+}
+
+// checkRequiredFields rejects a connection at save time when its own driver
+// reports a required field is missing — before the user commits to a record
+// that can never dial (that used to surface much later, as a confusing "no
+// database file given" the first time something tried to open it). Each
+// driver names its own requirements via Driver.RequiredFields, so adding
+// MySQL's (Host, User, ...) is implementing that method in the mysql
+// package, not editing a condition here.
+//
+// An unregistered driver id is left alone here — dial's own KindUnsupported
+// check is what reports that, and duplicating it would only be able to
+// disagree with it.
+func checkRequiredFields(rec store.Saved) error {
+	d, ok := driver.Lookup(rec.Driver)
+	if !ok {
+		return nil
+	}
+	missing := d.RequiredFields(rec.ConnConfig(""))
+	if len(missing) == 0 {
+		return nil
+	}
+	labels := make([]string, len(missing))
+	for i, field := range missing {
+		labels[i] = strings.ToUpper(field[:1]) + field[1:]
+	}
+	return dberr.New(dberr.KindInvalid, strings.Join(labels, ", ")+" is required")
 }
 
 // dial resolves the driver and opens a connection, returning the resolved

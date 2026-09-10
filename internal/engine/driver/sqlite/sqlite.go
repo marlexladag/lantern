@@ -40,6 +40,18 @@ func (drv) Capabilities() driver.Capabilities {
 	}
 }
 
+// RequiredFields: SQLite is file-backed, so File is the one thing it cannot
+// dial without. Open below already guards against an empty File — that stays,
+// as the last line of defence for a caller that reaches Open directly — but
+// by the time a connection is saved through connections.save, this is what
+// lets the API layer reject it before it is ever persisted.
+func (drv) RequiredFields(cfg driver.ConnConfig) []string {
+	if cfg.File == "" {
+		return []string{"file"}
+	}
+	return nil
+}
+
 func (drv) Open(ctx context.Context, cfg driver.ConnConfig) (driver.Conn, error) {
 	if cfg.File == "" {
 		return nil, dberr.New(dberr.KindNotFound, "no database file given")

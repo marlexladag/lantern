@@ -101,6 +101,33 @@ it('refuses to save without a name', async () => {
   expect(screen.getByRole('alert').textContent).toMatch(/name is required/i);
 });
 
+// User-found: a connection with a Name and no File used to save
+// successfully, and only failed much later, in the sidebar, as "no database
+// file given". SQLite cannot dial without a File, so Connect must refuse
+// before ever calling saveConnection — the same way it already refuses a
+// missing Name.
+it('refuses to save without a file', async () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  fill('local', '');
+
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  expect(saveMock).not.toHaveBeenCalled();
+  expect(screen.getByRole('alert').textContent).toMatch(/file is required/i);
+});
+
+// Test Connection round-trips to the engine; a request that cannot possibly
+// succeed should never be sent in the first place.
+it('refuses to test a connection without a file, without calling testConnection', async () => {
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  fill('local', '');
+
+  await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
+
+  expect(testMock).not.toHaveBeenCalled();
+  expect(screen.getByRole('alert').textContent).toMatch(/file is required/i);
+});
+
 it('falls back to a generic message when a failed test carries no error text', async () => {
   testMock.mockResolvedValue({ ok: false });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);

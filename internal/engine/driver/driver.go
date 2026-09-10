@@ -78,5 +78,19 @@ type Cursor interface {
 type Driver interface {
 	ID() string
 	Capabilities() Capabilities
+	// RequiredFields reports which ConnConfig fields must be non-empty for
+	// this driver to have any chance of dialing successfully — for example
+	// "file" for SQLite, or "host" for a networked driver. It returns the
+	// struct's own lowercase field names (the same vocabulary a caller reads
+	// them back as), so a caller can name what is missing without knowing
+	// which driver it is talking to. The caller is expected to check this at
+	// save time, before a connection that can never work is persisted; a
+	// driver that has no required fields returns nil.
+	//
+	// This exists so adding a driver's own requirements (MySQL needs Host;
+	// SQLite needs File) is implementing this method once, in that driver's
+	// own package — not editing a shared condition in the API layer for
+	// every driver that comes along.
+	RequiredFields(cfg ConnConfig) []string
 	Open(ctx context.Context, cfg ConnConfig) (Conn, error)
 }

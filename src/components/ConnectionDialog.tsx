@@ -18,6 +18,12 @@ const SWATCHES = ['#3d7d55', '#24707a', '#4a6ea8', '#7a5aa0', '#a8792c', '#9e443
 const DEFAULT_COLOR = '#3d7d55';
 const DANGER_COLOR = '#9e4436';
 
+// SQLite is the only selectable driver today (see the segmented control
+// below), so this is a constant rather than state. It exists as a named
+// value, not inlined, so it is the one place `buildConnection` and
+// `missingDriverField` both read from.
+const DRIVER = 'sqlite' as const;
+
 type TestStatus = { kind: 'ok' } | { kind: 'error'; message: string } | null;
 
 export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogProps) {
@@ -43,11 +49,27 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   function buildConnection(): NewConnection {
     return {
       name: name.trim(),
-      driver: 'sqlite',
+      driver: DRIVER,
       file: file.trim(),
       color,
       read_only: production,
     };
+  }
+
+  /**
+   * The field this driver cannot dial without, if it is empty — mirrors
+   * internal/engine/driver's own RequiredFields on the Go side, so the
+   * dialog and the engine agree on what "required" means without one
+   * having to trust the other. Unlike Name (checked separately: every
+   * driver needs a name to save a record under, dialing does not care what
+   * it is called), this is driver-specific. Adding MySQL/MariaDB later is
+   * adding a case here, not rewriting this function.
+   */
+  function missingDriverField(): string | null {
+    switch (DRIVER) {
+      case 'sqlite':
+        return file.trim() ? null : 'File';
+    }
   }
 
   function toggleProduction() {
@@ -63,6 +85,12 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     // and a disabled <button> never dispatches a click at all — the browser
     // enforces the single-flight invariant, so a redundant check here would
     // be unreachable dead code.
+    const missing = missingDriverField();
+    if (missing) {
+      setFormError(`${missing} is required`);
+      setTestStatus(null);
+      return;
+    }
     setFormError(null);
     setTesting(true);
     setTestStatus(null);
@@ -89,6 +117,11 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     const trimmedName = name.trim();
     if (!trimmedName) {
       setFormError('Name is required');
+      return;
+    }
+    const missing = missingDriverField();
+    if (missing) {
+      setFormError(`${missing} is required`);
       return;
     }
     setFormError(null);
@@ -154,7 +187,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
 
           <div className="field">
             <label className="field-label" htmlFor="conn-name">
-              Name
+              Name<span aria-hidden="true"> *</span>
             </label>
             <input
               id="conn-name"
@@ -164,13 +197,14 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="local"
+              aria-required="true"
               aria-invalid={formError === 'Name is required' ? 'true' : undefined}
             />
           </div>
 
           <div className="field">
             <label className="field-label" htmlFor="conn-file">
-              File
+              File<span aria-hidden="true"> *</span>
             </label>
             <input
               id="conn-file"
@@ -179,6 +213,8 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               value={file}
               onChange={(e) => setFile(e.target.value)}
               placeholder="/path/to/database.db"
+              aria-required="true"
+              aria-invalid={formError === 'File is required' ? 'true' : undefined}
             />
           </div>
 
