@@ -52,6 +52,14 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test ./... -race
+      # go test's own -coverprofile always reports 0% for cmd/engine: its
+      # tests deliberately drive the engine as a real subprocess rather than
+      # calling main() in-process, so nothing in that process is ever
+      # instrumented. go-coverage.sh works around this with go build -cover
+      # plus GOCOVERDIR (see its header comment), then fails the build if
+      # the true total statement coverage has dropped below 100%.
+      - name: Check Go statement coverage is 100%
+        run: ./scripts/go-coverage.sh --check
       # build-sidecars_test.sh deletes the output directory and runs
       # build-sidecars.sh itself, so a separate build step before it would
       # only be thrown away.
@@ -74,7 +82,12 @@ jobs:
       # cheapest job in the graph.
       - name: Typecheck
         run: npm run typecheck
-      - run: npm test
+      # test:coverage runs the same suite as `npm test` with coverage
+      # collection on; vitest.config.ts's 100% thresholds fail the build if
+      # coverage regresses, so this one step is both the test run and the
+      # coverage gate.
+      - name: Test with coverage
+        run: npm run test:coverage
 
   rust:
     name: rust checks

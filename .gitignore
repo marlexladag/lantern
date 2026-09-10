@@ -8,6 +8,8 @@
 node_modules/
 dist/
 .vite/
+# vitest --coverage output (npm run test:coverage)
+coverage/
 
 # Tauri
 src-tauri/target/
