@@ -128,3 +128,52 @@ func TestEncodeIsSafeForConcurrentUse(t *testing.T) {
 		}
 	}
 }
+
+// Regression test: an oversized line should corrupt the stream permanently.
+// The decoder must distinguish between ErrParse (recoverable) and
+// ErrStreamCorrupted (stream unusable).
+func TestDecoderDetectsOversizedLine(t *testing.T) {
+	// Create a line larger than the small buffer cap we'll set.
+	// The scanner will hit bufio.ErrTooLong and the stream becomes unusable.
+	oversized := strings.Repeat("x", 200*1024) + "\n"
+	in := strings.NewReader(oversized)
+
+	// Create decoder with small buffer cap to trigger the condition
+	d := NewDecoder(in)
+	// Override scanner buffer to make oversized line reachable (much smaller than default)
+	d.sc.Buffer(make([]byte, 0, 4*1024), 4*1024)
+
+	// Reading oversized line should return ErrStreamCorrupted, not ErrParse
+	// This is the key distinction: ErrParse means "this line was bad JSON, try again",
+	// but ErrStreamCorrupted means "stream is broken, stop reading".
+	_, err := d.Decode()
+	if !errors.Is(err, ErrStreamCorrupted) {
+		t.Fatalf("oversized line: err = %v, want ErrStreamCorrupted", err)
+	}
+}
+
+// Regression test: a nil Response ID must serialize with explicit "id":null.
+// JSON-RPC 2.0 requires the id field to always be present in responses.
+func TestResponseWithNilIDEncodesIDField(t *testing.T) {
+	var buf bytes.Buffer
+	e := NewEncoder(&buf)
+
+	// Encode a response with nil ID (for a parse error scenario)
+	err := e.Encode(&Response{JSONRPC: "2.0", ID: nil, Result: json.RawMessage(`null`)})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	out := buf.String()
+
+	// Parse the output to verify it's valid JSON
+	var back Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &back); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+
+	// Verify the encoded JSON contains the "id" field explicitly
+	if !strings.Contains(out, `"id":null`) {
+		t.Fatalf("output %q should contain explicit \"id\":null for nil ID", out)
+	}
+}

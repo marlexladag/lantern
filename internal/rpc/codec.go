@@ -18,6 +18,11 @@ const maxMessageBytes = 32 << 20
 // the server replies with a parse error and reads the next line.
 var ErrParse = errors.New("rpc: malformed JSON")
 
+// ErrStreamCorrupted reports that the stream has become unusable due to a
+// line that exceeds the maximum message size. The connection must be closed;
+// the stream cannot recover and is desynchronized.
+var ErrStreamCorrupted = errors.New("rpc: stream corrupted")
+
 // Decoder reads newline-delimited requests from a stream.
 type Decoder struct {
 	sc *bufio.Scanner
@@ -29,8 +34,11 @@ func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{sc: sc}
 }
 
-// Decode returns the next request. It returns io.EOF when the stream closes,
-// which is the engine's shutdown signal, and ErrParse on a malformed line.
+// Decode returns the next request. It returns:
+//   - io.EOF when the stream closes (engine shutdown signal)
+//   - ErrParse when a line is not valid JSON (stream stays usable)
+//   - ErrStreamCorrupted when a line exceeds maxMessageBytes (stream unusable)
+//   - Other errors from the underlying reader
 func (d *Decoder) Decode() (*Request, error) {
 	for d.sc.Scan() {
 		line := bytes.TrimSpace(d.sc.Bytes())
@@ -44,6 +52,9 @@ func (d *Decoder) Decode() (*Request, error) {
 		return &req, nil
 	}
 	if err := d.sc.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, ErrStreamCorrupted
+		}
 		return nil, err
 	}
 	return nil, io.EOF

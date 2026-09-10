@@ -33,7 +33,7 @@ func (r *Request) IsNotification() bool { return r.ID == nil }
 // Response is an outgoing reply. Exactly one of Result or Error is set.
 type Response struct {
 	JSONRPC string           `json:"jsonrpc"`
-	ID      *json.RawMessage `json:"id,omitempty"`
+	ID      *json.RawMessage `json:"id"`
 	Result  json.RawMessage  `json:"result,omitempty"`
 	Error   *Error           `json:"error,omitempty"`
 }
