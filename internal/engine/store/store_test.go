@@ -151,6 +151,23 @@ func TestConnConfigCarriesThePasswordButSavedDoesNot(t *testing.T) {
 	}
 }
 
+// Coordinator-flagged: ReadOnly was persisted and drawn as a lock icon in
+// the sidebar, but ConnConfig dropped it on the floor, so the flag never
+// reached a driver to enforce. Both states are asserted, not just true: a
+// ConnConfig that always reports ReadOnly (whatever Saved.ReadOnly said)
+// would just as wrongly force every connection read-only.
+func TestConnConfigCarriesTheReadOnlyFlag(t *testing.T) {
+	ro := Saved{Driver: "sqlite", File: "/tmp/a.db", ReadOnly: true}.ConnConfig("")
+	if !ro.ReadOnly {
+		t.Error("ConnConfig lost ReadOnly=true")
+	}
+
+	rw := Saved{Driver: "sqlite", File: "/tmp/a.db", ReadOnly: false}.ConnConfig("")
+	if rw.ReadOnly {
+		t.Error("ConnConfig reported ReadOnly=true for a Saved with ReadOnly=false")
+	}
+}
+
 func TestSavedHasNoPasswordField(t *testing.T) {
 	b, err := json.Marshal(Saved{Name: "x", Driver: "sqlite"})
 	if err != nil {

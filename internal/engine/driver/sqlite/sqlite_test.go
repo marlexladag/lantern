@@ -433,3 +433,79 @@ func TestClassifyNeverLetsNativeDriverTextReachMessage(t *testing.T) {
 		t.Errorf("Native did not carry the original driver text: %q", got.Native)
 	}
 }
+
+// -- ReadOnly (A-3): the flag must actually be enforced, not merely drawn as
+// -- a lock icon in the sidebar ------------------------------------------
+
+// Coordinator-flagged: opens the same file twice, once with ReadOnly and
+// once without, and proves the difference by attempting the same write
+// against both — the only assertion that actually distinguishes "enforced"
+// from "accepted and ignored".
+func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
+	path := fixture(t)
+
+	ro, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	rw, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path})
+	if err != nil {
+		t.Fatalf("open read-write: %v", err)
+	}
+	t.Cleanup(func() { _ = rw.Close() })
+
+	cur, err := ro.Query(context.Background(), "CREATE TABLE should_not_exist (id INTEGER PRIMARY KEY)")
+	if err == nil {
+		cur.Close()
+		t.Fatal("CREATE TABLE succeeded against a read-only connection")
+	}
+	got := dberr.From(err)
+	// Record which Kind a read-only rejection classifies as, and require it
+	// not to be Unknown — an unmapped result code reporting Unknown is
+	// indistinguishable from any other unclassified failure, which defeats
+	// the point of a normalized error model (spec section 11).
+	if got.Kind == dberr.KindUnknown {
+		t.Errorf("read-only rejection classified as %q, want a specific Kind, not Unknown", got.Kind)
+	}
+	t.Logf("read-only CREATE TABLE rejection classifies as Kind %q, Message %q", got.Kind, got.Message)
+
+	cur2, err := rw.Query(context.Background(), "CREATE TABLE should_exist (id INTEGER PRIMARY KEY)")
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed against a read-write connection: %v", err)
+	}
+	cur2.Close()
+
+	cat, err := rw.Introspect(context.Background())
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	db, _ := cat.Database("main")
+	if _, ok := db.Table("should_exist"); !ok {
+		t.Error("the read-write CREATE TABLE did not actually take effect")
+	}
+}
+
+// SELECT must keep working on a read-only connection — the flag blocks
+// writes, not reads.
+func TestReadOnlyConnectionStillAllowsReads(t *testing.T) {
+	c, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: fixture(t), ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	cur, err := c.Query(context.Background(), "SELECT id FROM users")
+	if err != nil {
+		t.Fatalf("select against a read-only connection: %v", err)
+	}
+	defer cur.Close()
+	rows, err := cur.Next(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("got %d rows, want 2", len(rows))
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -72,12 +73,56 @@ func (drv) Open(ctx context.Context, cfg driver.ConnConfig) (driver.Conn, error)
 	// "sqlite" is always a registered driver name — the only condition under
 	// which sql.Open itself ever returns an error. Real failures to open
 	// cfg.File surface at first use, caught by PingContext right below.
-	db, _ := sql.Open("sqlite", cfg.File)
+	db, _ := sql.Open("sqlite", dsn(cfg))
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, classify(err, "")
 	}
 	return &conn{db: db}, nil
+}
+
+// dsn builds the DSN modernc.org/sqlite actually understands for cfg.
+//
+// Verified against modernc.org/sqlite@v1.39.0's own source (the exact
+// version pinned in go.mod), because the obvious file-URI "mode=ro"
+// parameter turned out NOT to work: newConn (sqlite.go) hardcodes
+// SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE on every open regardless of the
+// DSN, "mode" is never read by applyQueryParams or getVFSName, and the
+// package's own test suite documents this outright — all_test.go's
+// TestInMemory passes "mode=readonly" and comments "This parameter should be
+// ignored". Shipping ReadOnly as mode=ro would therefore be exactly the fake
+// safety mechanism ConnConfig.ReadOnly's doc comment warns against: a lock
+// icon in the sidebar next to a connection that can still be written to.
+//
+// PRAGMA query_only is the mechanism that actually works. It is a real,
+// compiled-in SQLite pragma — confirmed against the SQLITE_QueryOnly flag
+// and its "Writes prohibited by the "PRAGMA query_only=TRUE" statement"
+// comment in modernc.org/sqlite/lib@v1.39.0's vendored amalgamation — and is
+// enforced by the VDBE bytecode interpreter itself on every statement that
+// would modify the database, not by a client-side check this package could
+// forget to make. Confirmed empirically too: query_only(1) makes CREATE
+// TABLE fail with SQLITE_READONLY while SELECT keeps working, and a second,
+// separate connection without it keeps writing the same file. Any driver
+// that turns out NOT to have an equivalent enforced-by-the-engine mechanism
+// must fail Open for ReadOnly rather than take this shortcut.
+//
+// _pragma is applied unconditionally, independent of ReadOnly: SQLite's
+// default busy_timeout is 0, which turns any writer that contends with
+// another connection for the same file into an instant SQLITE_BUSY rather
+// than a brief, usually-successful wait — trivially reachable the moment two
+// tabs, or Lantern and any other process, touch the same .db file at once.
+// modernc.org/sqlite's applyQueryParams (sqlite.go) executes every _pragma
+// value verbatim as `PRAGMA <value>`, and the function-call form used below
+// is valid PRAGMA syntax for any pragma that takes one argument — the same
+// form the package's own doc comment for DSNs uses as its example
+// (`_pragma=foreign_keys(1)`).
+func dsn(cfg driver.ConnConfig) string {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	if cfg.ReadOnly {
+		q.Add("_pragma", "query_only(1)")
+	}
+	return cfg.File + "?" + q.Encode()
 }
 
 type conn struct{ db *sql.DB }
@@ -241,16 +286,20 @@ func (c *cursor) Next(ctx context.Context, n int) ([]driver.Row, error) {
 // extended) result code returned by the C library
 // (https://www.sqlite.org/rescode.html#pve): SQLITE_CONSTRAINT == 19 covers
 // every SQLITE_CONSTRAINT_* subtype (UNIQUE, NOT NULL, FOREIGN KEY, CHECK,
-// ...), and SQLITE_CANTOPEN == 14 covers every SQLITE_CANTOPEN_* subtype.
-// These numbers are part of SQLite's own long-stable C API, not
+// ...), SQLITE_CANTOPEN == 14 covers every SQLITE_CANTOPEN_* subtype, and
+// SQLITE_READONLY == 8 covers every SQLITE_READONLY_* subtype (including the
+// one PRAGMA query_only itself raises — see dsn's doc comment). These
+// numbers are part of SQLite's own long-stable C API, not
 // modernc.org/sqlite-specific; confirmed against
-// modernc.org/sqlite/lib@v1.39.0's own SQLITE_CONSTRAINT* and
-// SQLITE_CANTOPEN* constants, and empirically against the codes modernc.org/
-// sqlite actually returns for a UNIQUE/NOT NULL/FOREIGN KEY violation and for
-// opening a directory as a database file.
+// modernc.org/sqlite/lib@v1.39.0's own SQLITE_CONSTRAINT*, SQLITE_CANTOPEN*
+// and SQLITE_READONLY constants, and empirically against the codes
+// modernc.org/sqlite actually returns for a UNIQUE/NOT NULL/FOREIGN KEY
+// violation, for opening a directory as a database file, and for a write
+// attempted against a query_only(1) connection.
 const (
 	sqliteResultConstraint = 19 // SQLITE_CONSTRAINT
 	sqliteResultCantOpen   = 14 // SQLITE_CANTOPEN
+	sqliteResultReadOnly   = 8  // SQLITE_READONLY
 )
 
 // classify maps a SQLite error onto a Kind and a fixed, engine-neutral
@@ -266,9 +315,19 @@ const (
 //	condition                                  Kind        Message
 //	result code SQLITE_CONSTRAINT              constraint  "the statement violates a constraint"
 //	result code SQLITE_CANTOPEN                not_found   "the database file could not be opened"
+//	result code SQLITE_READONLY                constraint  "the connection is read-only"
 //	text has "syntax error" or "no such column" syntax     "the statement is not valid SQL"
 //	text has "no such table"                   not_found   "the table does not exist"
 //	otherwise                                  unknown     "the database reported an error"
+//
+// SQLITE_READONLY reports as Constraint rather than a dedicated Kind: like a
+// genuine constraint violation, it is a statement-level rejection that
+// leaves the database unchanged and is meaningful to retry elsewhere (a
+// read-write connection to the same file), which is a closer fit than
+// NotFound, Unsupported ("this engine can't do that" — untrue; this engine
+// can, this connection just won't) or Unknown. This mapping exists because
+// A-3's adversarial test proved SQLITE_READONLY landed in Unknown before it
+// was added — see TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds.
 //
 // modernc.org/sqlite enables extended result codes on every connection it
 // opens (see its newConn) and exposes them through its own *sqlite.Error via
@@ -306,6 +365,8 @@ func classify(err error, stmt string) error {
 			kind, message = dberr.KindConstraint, "the statement violates a constraint"
 		case sqliteResultCantOpen:
 			kind, message = dberr.KindNotFound, "the database file could not be opened"
+		case sqliteResultReadOnly:
+			kind, message = dberr.KindConstraint, "the connection is read-only"
 		}
 	}
 

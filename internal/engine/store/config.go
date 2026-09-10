@@ -46,6 +46,11 @@ func (s Saved) ConnConfig(password string) driver.ConnConfig {
 		Password: password,
 		Database: s.Database,
 		File:     s.File,
+		// Coordinator-flagged: ReadOnly is persisted and drawn as a lock icon
+		// in the sidebar, but was dropped here, so the flag never actually
+		// reached a driver to enforce. See driver.ConnConfig.ReadOnly's own
+		// doc comment for what enforcing it means.
+		ReadOnly: s.ReadOnly,
 	}
 }
 

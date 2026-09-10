@@ -48,6 +48,17 @@ type ConnConfig struct {
 	File    string
 	Options map[string]string
 	Dialer  DialFunc
+	// ReadOnly is a safety mechanism, not decoration (spec section 12):
+	// production connections default to it, tinted red, so an accidental
+	// UPDATE or DELETE against a live database fails outright instead of
+	// merely prompting for confirmation. Enforcing it is the driver's job —
+	// Open must reject any statement that would modify the database, by
+	// whatever mechanism the engine actually offers, not merely decline to
+	// issue writes itself. A driver that cannot enforce this at all must
+	// fail Open outright rather than silently accept the flag and allow
+	// writes anyway; a flag that looks respected but is not is worse than no
+	// flag.
+	ReadOnly bool
 }
 
 // Conn is a live connection. Every driver implements exactly this.
