@@ -17,7 +17,7 @@ import (
 	"github.com/marlexladag/lantern/internal/engine/driver"
 	"github.com/marlexladag/lantern/internal/engine/schema"
 
-	_ "modernc.org/sqlite"
+	modernc "modernc.org/sqlite"
 )
 
 // databaseName is what SQLite's single database is called in the catalog.
@@ -198,8 +198,13 @@ func (c *cursor) Next(ctx context.Context, n int) ([]driver.Row, error) {
 		if err := c.rows.Scan(ptrs...); err != nil {
 			return out, classify(err, c.stmt)
 		}
-		// Driver byte slices are reused between scans, so copy anything that
-		// aliases them into a string before handing it to the caller.
+		// database/sql's Scan already clones a []byte into a fresh slice
+		// before it reaches an `any` destination (see convertAssignRows), so
+		// nothing here is actually aliasing the driver's internal buffer.
+		// Convert to string anyway as defence in depth: that cloning is an
+		// unexported implementation detail of the standard library, not a
+		// documented guarantee this code should rely on, and every other
+		// driver this cursor might wrap someday may not behave the same way.
 		for i, v := range cells {
 			if b, ok := v.([]byte); ok {
 				cells[i] = string(b)
@@ -213,13 +218,44 @@ func (c *cursor) Next(ctx context.Context, n int) ([]driver.Row, error) {
 	return out, nil
 }
 
-// classify maps a SQLite error onto a Kind. SQLite reports through message
-// text rather than typed errors, so this matches on substrings — narrowly, and
-// falling through to Unknown rather than guessing.
+// SQLite's own "primary result code" is the low 8 bits of the (possibly
+// extended) result code returned by the C library
+// (https://www.sqlite.org/rescode.html#pve): SQLITE_CONSTRAINT == 19 covers
+// every SQLITE_CONSTRAINT_* subtype (UNIQUE, NOT NULL, FOREIGN KEY, CHECK,
+// ...), and SQLITE_CANTOPEN == 14 covers every SQLITE_CANTOPEN_* subtype.
+// These numbers are part of SQLite's own long-stable C API, not
+// modernc.org/sqlite-specific; confirmed against
+// modernc.org/sqlite/lib@v1.39.0's own SQLITE_CONSTRAINT* and
+// SQLITE_CANTOPEN* constants, and empirically against the codes modernc.org/
+// sqlite actually returns for a UNIQUE/NOT NULL/FOREIGN KEY violation and for
+// opening a directory as a database file.
+const (
+	sqliteResultConstraint = 19 // SQLITE_CONSTRAINT
+	sqliteResultCantOpen   = 14 // SQLITE_CANTOPEN
+)
+
+// classify maps a SQLite error onto a Kind.
+//
+// modernc.org/sqlite enables extended result codes on every connection it
+// opens (see its newConn) and exposes them through its own *sqlite.Error via
+// Code(). That is preferred over message text wherever SQLite actually
+// distinguishes the failure this way, because a numeric code cannot collide
+// with a query's own vocabulary — a table or column can legally be named
+// e.g. "no such table" or "syntax error", and hitting one with a genuine
+// constraint violation must still report Constraint, not misread its own
+// identifier as a NotFound or Syntax message. SQLite has no distinct result
+// code for a syntax error, a missing table, or a missing column, though —
+// all three surface as the same generic SQLITE_ERROR (1) — so message text
+// is the only way to tell those apart; that remains a fallback of necessity,
+// not convenience, and stays narrow.
+//
+// Every call site guards with `if err != nil` before calling classify, so
+// err is never nil here; there is deliberately no defensive nil check for
+// that (it would be untestable dead code under this package's 100% coverage
+// gate). A future call site that violates this panics immediately, loudly,
+// and traceably — see dberr.From(nil).Kind below — rather than silently
+// doing something surprising.
 func classify(err error, stmt string) error {
-	if err == nil {
-		return nil
-	}
 	if e := dberr.From(err); e.Kind == dberr.KindCanceled || e.Kind == dberr.KindTimeout {
 		if stmt != "" {
 			return e.WithQuery(stmt)
@@ -227,19 +263,26 @@ func classify(err error, stmt string) error {
 		return e
 	}
 
-	msg := err.Error()
 	kind := dberr.KindUnknown
-	switch {
-	case strings.Contains(msg, "syntax error"), strings.Contains(msg, "no such column"):
-		kind = dberr.KindSyntax
-	case strings.Contains(msg, "no such table"):
-		kind = dberr.KindNotFound
-	case strings.Contains(msg, "UNIQUE constraint failed"),
-		strings.Contains(msg, "NOT NULL constraint failed"),
-		strings.Contains(msg, "FOREIGN KEY constraint failed"):
-		kind = dberr.KindConstraint
-	case strings.Contains(msg, "unable to open database file"):
-		kind = dberr.KindNotFound
+
+	var sqliteErr *modernc.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case sqliteResultConstraint:
+			kind = dberr.KindConstraint
+		case sqliteResultCantOpen:
+			kind = dberr.KindNotFound
+		}
+	}
+
+	msg := err.Error()
+	if kind == dberr.KindUnknown {
+		switch {
+		case strings.Contains(msg, "syntax error"), strings.Contains(msg, "no such column"):
+			kind = dberr.KindSyntax
+		case strings.Contains(msg, "no such table"):
+			kind = dberr.KindNotFound
+		}
 	}
 
 	out := dberr.Wrap(kind, msg, err)

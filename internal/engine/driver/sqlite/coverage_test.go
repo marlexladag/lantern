@@ -98,8 +98,12 @@ func TestIntrospectAfterCloseFails(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if _, err := c.Introspect(context.Background()); err == nil {
+	_, err := c.Introspect(context.Background())
+	if err == nil {
 		t.Fatal("introspect on a closed connection succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindUnknown {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindUnknown, err)
 	}
 }
 
@@ -108,8 +112,12 @@ func TestColumnsAfterCloseFails(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if _, err := c.Columns(context.Background(), "main", "users"); err == nil {
+	_, err := c.Columns(context.Background(), "main", "users")
+	if err == nil {
 		t.Fatal("columns on a closed connection succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindUnknown {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindUnknown, err)
 	}
 }
 
@@ -138,6 +146,22 @@ func TestNextReturnsCanceledWhenContextIsAlreadyDone(t *testing.T) {
 	}
 }
 
+// Kept deliberately, not merely retained by default: this was one of two
+// tests reviewed for removal alongside the classify nil-guard (see above),
+// on the theory that an unreachable-through-the-public-API branch is dead
+// weight. It is not the same shape of unreachable as the sql.Open /
+// rows.ColumnTypes branches removed from Open and Query, or as classify's
+// former nil guard — in every one of those, discarding the "impossible"
+// error left the success path exactly as correct as before (db and types
+// are already well-formed regardless; a nil err reaching classify would
+// have panicked immediately and loudly, not corrupted anything). Discarding
+// *this* Scan error would not: per database/sql's scanLocked, a
+// destination-count mismatch is caught before a single value is converted,
+// so `cells` would stay all-nil and Next would silently hand the caller a
+// fabricated empty-looking row instead of an error. That failure mode is
+// exactly what this driver's dberr classification exists to prevent, so the
+// check — and this regression test for it — stays.
+//
 // A NULL always converts cleanly into a `*any` destination (see
 // database/sql's convertAssignRows), so Scan can never fail on a type
 // mismatch through this driver's cursor. The one way Scan does fail is a
@@ -162,10 +186,13 @@ func TestNextReportsAScanErrorOnDestinationCountMismatch(t *testing.T) {
 // modernc.org/sqlite returns TEXT columns as Go strings already (see the
 // email assertion in TestQueryStreamsRowsAndReportsColumns), so the
 // byte-slice-to-string copy in Next is only exercised by a genuine BLOB
-// column. Two distinct rows in the same Next call also prove it is a real
-// copy, not an alias: the driver reuses its internal scan buffer between
-// rows, so aliasing would show up here as both rows reading back with the
-// second row's content.
+// column. Two distinct rows in the same Next call double as a regression
+// guard for that copy: database/sql's Scan already clones a []byte before
+// it reaches Next's `any` destination (see convertAssignRows), so nothing
+// here is working around a live aliasing bug today — but if the string()
+// conversion in Next were ever replaced with something that aliases instead
+// of copying, a shared buffer would show up here as both rows reading back
+// with the second row's content.
 func TestNextCopiesBlobValuesIntoDistinctStrings(t *testing.T) {
 	path := fixture(t)
 	raw, err := sql.Open("sqlite", path)
@@ -209,12 +236,11 @@ func TestNextCopiesBlobValuesIntoDistinctStrings(t *testing.T) {
 }
 
 // -- classify: direct and canceled/timeout paths ------------------------
-
-func TestClassifyReturnsNilForNilError(t *testing.T) {
-	if err := classify(nil, "SELECT 1"); err != nil {
-		t.Errorf("classify(nil, ...) = %v, want nil", err)
-	}
-}
+//
+// classify no longer has a nil-error guard to test: every call site already
+// guards with `if err != nil`, so it was untestable dead code (see the
+// removal in sqlite.go). Removed together with
+// TestClassifyReturnsNilForNilError, which existed only to cover it.
 
 // Query always has a non-empty statement, so a canceled context surfaces as
 // Canceled carrying the statement that was in flight.
@@ -336,6 +362,61 @@ func TestQueryForeignKeyConstraintViolationReportsConstraint(t *testing.T) {
 	_, err := c.Query(ctx, stmt)
 	if err == nil {
 		t.Fatal("inserting a dangling foreign key succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindConstraint {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindConstraint, err)
+	}
+}
+
+// classify must not let an identifier's own text steer classification: a
+// table or column can legally be named after SQL-error vocabulary, and a
+// genuine constraint violation on it must still report Constraint. Before
+// the fix these reported NotFound and Syntax respectively, because
+// substring matching on the error message saw "no such table" / "syntax
+// error" inside the *identifier* and matched before ever reaching the
+// constraint case.
+func TestQueryConstraintViolationOnATableNamedLikeAnErrorMessage(t *testing.T) {
+	c := open(t, fixture(t))
+	ctx := context.Background()
+	table := `"no such table thing"`
+
+	for _, stmt := range []string{
+		"CREATE TABLE " + table + " (id INTEGER PRIMARY KEY, email TEXT)",
+		"INSERT INTO " + table + " (id, email) VALUES (1, 'a@example.com')",
+	} {
+		cur, err := c.Query(ctx, stmt)
+		if err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+		cur.Close()
+	}
+
+	stmt := "INSERT INTO " + table + " (id, email) VALUES (1, 'b@example.com')"
+	_, err := c.Query(ctx, stmt)
+	if err == nil {
+		t.Fatal("a duplicate primary key insert succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindConstraint {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindConstraint, err)
+	}
+}
+
+func TestQueryConstraintViolationOnAColumnNamedLikeAnErrorMessage(t *testing.T) {
+	c := open(t, fixture(t))
+	ctx := context.Background()
+	column := `"col with syntax error in it"`
+
+	stmt := "CREATE TABLE t2 (id INTEGER PRIMARY KEY, " + column + " TEXT NOT NULL)"
+	cur, err := c.Query(ctx, stmt)
+	if err != nil {
+		t.Fatalf("setup %q: %v", stmt, err)
+	}
+	cur.Close()
+
+	stmt = "INSERT INTO t2 (id, " + column + ") VALUES (1, NULL)"
+	_, err = c.Query(ctx, stmt)
+	if err == nil {
+		t.Fatal("inserting a NULL into a NOT NULL column succeeded")
 	}
 	if got := dberr.From(err); got.Kind != dberr.KindConstraint {
 		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindConstraint, err)
