@@ -177,3 +177,44 @@ func TestResponseWithNilIDEncodesIDField(t *testing.T) {
 		t.Fatalf("output %q should contain explicit \"id\":null for nil ID", out)
 	}
 }
+
+// errWriter always fails, standing in for a shell that has disappeared out
+// from under the engine (a closed pipe, a dead process on the other end).
+// Shared by codec_test.go and server_test.go.
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// Regression test: json.Marshal failing must surface as an error from
+// Encode, not a panic or a partial/corrupt line on the wire. A chan value
+// is a realistic way for this to happen for real: a handler's result type
+// changes and gains a field json.Marshal cannot handle.
+func TestEncodeReturnsMarshalError(t *testing.T) {
+	var buf bytes.Buffer
+	e := NewEncoder(&buf)
+
+	if err := e.Encode(make(chan int)); err == nil {
+		t.Fatal("want an error encoding an unmarshalable value")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("nothing should reach the stream on a marshal failure, got %q", buf.String())
+	}
+}
+
+// Regression test: if the shell's stdin pipe is gone, the write itself
+// fails (as opposed to a marshal failure, which never reaches the
+// underlying writer at all). The payload here is deliberately larger than
+// bufio's 4 KiB default buffer, on an otherwise-empty buffer, so
+// bufio.Writer forwards straight to the underlying writer instead of
+// silently buffering it - it is that direct write's error we need Encode
+// to propagate rather than swallow.
+func TestEncodeReturnsWriteError(t *testing.T) {
+	wantErr := errors.New("stdout is gone")
+	e := NewEncoder(errWriter{err: wantErr})
+
+	big := &Response{JSONRPC: "2.0", Result: json.RawMessage(`"` + strings.Repeat("x", 5000) + `"`)}
+	err := e.Encode(big)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
