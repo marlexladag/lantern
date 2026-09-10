@@ -253,7 +253,22 @@ const (
 	sqliteResultCantOpen   = 14 // SQLITE_CANTOPEN
 )
 
-// classify maps a SQLite error onto a Kind.
+// classify maps a SQLite error onto a Kind and a fixed, engine-neutral
+// Message, decided together — see the table below. The driver's own text is
+// never used as Message; it goes to Native instead (dberr.Wrap's third
+// argument, which stays err.Error() as it always has), and stays there
+// "shown only on request" (spec section 11). Before this, classify passed
+// err.Error() straight through as Message, so Message and Native were
+// identical for every classified failure: a SQLite error leaked the
+// absolute database file path into the sidebar, and MySQL's net.OpError
+// would leak host and port the same way.
+//
+//	condition                                  Kind        Message
+//	result code SQLITE_CONSTRAINT              constraint  "the statement violates a constraint"
+//	result code SQLITE_CANTOPEN                not_found   "the database file could not be opened"
+//	text has "syntax error" or "no such column" syntax     "the statement is not valid SQL"
+//	text has "no such table"                   not_found   "the table does not exist"
+//	otherwise                                  unknown     "the database reported an error"
 //
 // modernc.org/sqlite enables extended result codes on every connection it
 // opens (see its newConn) and exposes them through its own *sqlite.Error via
@@ -282,29 +297,29 @@ func classify(err error, stmt string) error {
 		return e
 	}
 
-	kind := dberr.KindUnknown
+	kind, message := dberr.KindUnknown, "the database reported an error"
 
 	var sqliteErr *modernc.Error
 	if errors.As(err, &sqliteErr) {
 		switch sqliteErr.Code() & 0xff {
 		case sqliteResultConstraint:
-			kind = dberr.KindConstraint
+			kind, message = dberr.KindConstraint, "the statement violates a constraint"
 		case sqliteResultCantOpen:
-			kind = dberr.KindNotFound
+			kind, message = dberr.KindNotFound, "the database file could not be opened"
 		}
 	}
 
-	msg := err.Error()
 	if kind == dberr.KindUnknown {
+		text := err.Error()
 		switch {
-		case strings.Contains(msg, "syntax error"), strings.Contains(msg, "no such column"):
-			kind = dberr.KindSyntax
-		case strings.Contains(msg, "no such table"):
-			kind = dberr.KindNotFound
+		case strings.Contains(text, "syntax error"), strings.Contains(text, "no such column"):
+			kind, message = dberr.KindSyntax, "the statement is not valid SQL"
+		case strings.Contains(text, "no such table"):
+			kind, message = dberr.KindNotFound, "the table does not exist"
 		}
 	}
 
-	out := dberr.Wrap(kind, msg, err)
+	out := dberr.Wrap(kind, message, err)
 	if stmt != "" {
 		out = out.WithQuery(stmt)
 	}
