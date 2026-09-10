@@ -1,0 +1,124 @@
+/**
+ * Design tokens for Lantern, transcribed from design/Foundations.dc.html.
+ *
+ * These are the values to implement, not approximations of them. Light
+ * values live on :root. Dark values apply either when the OS prefers dark
+ * and the app has not been pinned to light (`:root:not([data-theme="light"])`
+ * under the media query), or when the app has been explicitly pinned to dark
+ * (`:root[data-theme="dark"]`, outside the media query so it wins even on a
+ * light system). No theme switcher exists yet — `data-theme` is the hook a
+ * future one attaches to.
+ */
+
+:root {
+  /* Surfaces */
+  --color-bg: #f2f1ee;
+  --color-surface: #fbfaf8;
+  --color-alt: #f6f5f2;
+  --color-line: #dedbd5;
+  --color-hair: #eae7e2;
+
+  /* Text */
+  --color-text: #23211e;
+  --color-dim: #6f6a63;
+  --color-faint: #7d766d;
+
+  /* Accent / semantic */
+  --color-accent: #24707a;
+  --color-accent-bg: #deeef0;
+  --color-sel: #e7f0f0;
+  --color-danger: #9e4436;
+  --color-danger-bg: #f6e6e2;
+  --color-warn: #a8792c;
+  --color-warn-bg: #f7eeda;
+  --color-ok: #3d7d55;
+  --color-ok-bg: #e3efe6;
+
+  /* Type */
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, Menlo, 'Cascadia Mono', monospace;
+  --text-heading: 19px;
+  --text-subhead: 14px;
+  --text-body: 12px;
+  --text-label: 11px;
+  --text-section: 10px;
+
+  /* Density: the row/control heights the whole design is built around */
+  --row-data: 26px;
+  --row-header: 28px;
+  --row-sidebar: 24px;
+  --height-tabbar: 34px;
+  --height-toolbar: 36px;
+  --height-titlebar: 38px;
+  --height-statusbar: 26px;
+  --width-sidebar: 244px;
+  --control-toolbar: 23px;
+  --control-dialog: 28px;
+  --gutter-cell: 10px;
+
+  /* Structure */
+  --hairline: 1px;
+  --radius-control-sm: 4px;
+  --radius-control-lg: 5px;
+  --radius-panel-sm: 7px;
+  --radius-panel-lg: 9px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --color-bg: #1b1a18;
+    --color-surface: #212020;
+    --color-alt: #262523;
+    --color-line: #35322e;
+    --color-hair: #2b2926;
+
+    --color-text: #e9e6e0;
+    --color-dim: #9b948b;
+    --color-faint: #7e776f;
+
+    --color-accent: #57aab2;
+    --color-accent-bg: #173a3c;
+    --color-sel: #1e3335;
+    --color-danger: #c9705d;
+    --color-danger-bg: #3a221d;
+    --color-warn: #c99a4e;
+    --color-warn-bg: #382c17;
+    --color-ok: #6aab80;
+    --color-ok-bg: #1e3325;
+  }
+}
+
+:root[data-theme='dark'] {
+  --color-bg: #1b1a18;
+  --color-surface: #212020;
+  --color-alt: #262523;
+  --color-line: #35322e;
+  --color-hair: #2b2926;
+
+  --color-text: #e9e6e0;
+  --color-dim: #9b948b;
+  --color-faint: #7e776f;
+
+  --color-accent: #57aab2;
+  --color-accent-bg: #173a3c;
+  --color-sel: #1e3335;
+  --color-danger: #c9705d;
+  --color-danger-bg: #3a221d;
+  --color-warn: #c99a4e;
+  --color-warn-bg: #382c17;
+  --color-ok: #6aab80;
+  --color-ok-bg: #1e3325;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}

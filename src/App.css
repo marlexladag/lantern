@@ -1,0 +1,56 @@
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.app-titlebar {
+  flex: 0 0 var(--height-titlebar);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 12px;
+  border-bottom: var(--hairline) solid var(--color-line);
+}
+
+.app-titlebar h1 {
+  font-size: var(--text-subhead);
+  font-weight: 600;
+  margin: 0;
+}
+
+.app-titlebar-spacer {
+  flex: 1;
+}
+
+.app-add-connection {
+  height: var(--control-toolbar);
+  padding: 0 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control-sm);
+  background: var(--color-surface);
+  color: var(--color-dim);
+  font-size: var(--text-label);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.app-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  background: var(--color-surface);
+  color: var(--color-faint);
+  font-size: var(--text-body);
+}
