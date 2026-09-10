@@ -17,7 +17,7 @@ LIGHT = """
   --text:#23211e; --dim:#6f6a63; --faint:#7d766d;
   --accent:#24707a; --accent-bg:#deeef0; --sel:#e7f0f0;
   --danger:#9e4436; --danger-bg:#f6e6e2;
-  --warn:#a8792c; --warn-bg:#f7eeda;
+  --warn:#8a6317; --warn-bg:#f7eeda;
   --ok:#3d7d55; --ok-bg:#e3efe6;
 """
 
@@ -693,7 +693,7 @@ FND_CSS = """
 LIGHT_SW = [("bg", "#f2f1ee"), ("surface", "#fbfaf8"), ("alt", "#f6f5f2"), ("line", "#dedbd5"),
             ("hair", "#eae7e2"), ("text", "#23211e"), ("dim", "#6f6a63"), ("faint", "#7d766d"),
             ("sel", "#e7f0f0"), ("accent", "#24707a"), ("accent-bg", "#deeef0"),
-            ("danger", "#9e4436"), ("danger-bg", "#f6e6e2"), ("warn", "#a8792c"),
+            ("danger", "#9e4436"), ("danger-bg", "#f6e6e2"), ("warn", "#8a6317"),
             ("warn-bg", "#f7eeda"), ("ok", "#3d7d55"), ("ok-bg", "#e3efe6")]
 DARK_SW = [("bg", "#1b1a18"), ("surface", "#212020"), ("alt", "#262523"), ("line", "#35322e"),
            ("hair", "#2b2926"), ("text", "#e9e6e0"), ("dim", "#9b948b"), ("faint", "#7e776f"),
