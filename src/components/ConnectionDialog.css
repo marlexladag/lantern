@@ -73,9 +73,16 @@
   letter-spacing: 0.01em;
 }
 
+/*
+ * Validation is retryable, not destructive: the user just needs to fill in
+ * a field. Foundations.dc.html reserves --color-danger for production and
+ * destructive actions, so an ordinary "Name is required" nudge uses
+ * --color-warn instead — same for the aria-invalid border below and the
+ * failed Test Connection result further down this file.
+ */
 .field-error {
   font-size: var(--text-label);
-  color: var(--color-danger);
+  color: var(--color-warn);
 }
 
 .text-input {
@@ -100,7 +107,7 @@
 }
 
 .text-input[aria-invalid='true'] {
-  border-color: var(--color-danger);
+  border-color: var(--color-warn);
 }
 
 .segmented {
@@ -270,7 +277,7 @@
 }
 
 .test-result.error {
-  color: var(--color-danger);
+  color: var(--color-warn);
 }
 
 .result-dot {

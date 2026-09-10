@@ -79,6 +79,12 @@
   flex: 1;
 }
 
+/*
+ * Not a failure surface: this is the read-only badge for a production
+ * connection (connection.read_only tracks the Production toggle in
+ * ConnectionDialog). Foundations.dc.html reserves --color-danger for
+ * production, so this one stays red on purpose.
+ */
 .sidebar-lock {
   color: var(--color-danger);
   display: flex;
@@ -103,9 +109,16 @@
   padding-left: 30px;
 }
 
+/*
+ * Covers all three sidebar failure surfaces: the connection list failing to
+ * load, a session failing to open, and a table's columns failing to load.
+ * All three are retryable (reload, reopen, re-expand) rather than
+ * destructive, so they use --color-warn — --color-danger is reserved for
+ * production and destructive actions (Foundations.dc.html).
+ */
 .sidebar-error {
   font-size: var(--text-label);
-  color: var(--color-danger);
+  color: var(--color-warn);
   padding: 2px 10px 6px 30px;
   white-space: normal;
   word-break: break-word;
