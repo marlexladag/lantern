@@ -323,6 +323,21 @@ The decisions that constrain implementation, and therefore belong here:
   commit; and a dot on any tab holding uncommitted changes.
 - **Cancel is always on screen** while a query runs, never behind a menu, and
   results stream into the grid as they arrive.
+- **Native platform conventions, not web defaults.** This is where a webview app
+  gives itself away, and it is a requirement rather than polish:
+  - **Every right-click must hit an app-defined menu.** Left alone, macOS shows
+    its text-selection menu — Look Up, Translate, Search with Google, Summarize —
+    on a connection row, where the useful actions are Edit, Duplicate, Test
+    Connection and Delete. A table row wants Copy, Copy as INSERT, and Refresh; a
+    grid cell wants Copy and Set NULL. Suppress the default menu everywhere and
+    provide a real one per surface.
+  - **UI chrome is not selectable text.** Labels, section headings and driver
+    names must carry `user-select: none`; only data cells and query text are
+    selectable. A drag across a sidebar label highlighting it like prose is the
+    single clearest tell that a desktop app is a web page.
+  - **Developer tools must not reach a release build.** Confirm by inspecting a
+    packaged bundle, not by assuming the framework default.
+
 - **Both themes are first-class.** Every token has a light and dark value; the
   palette on the Foundations artboard is the source for both.
 
