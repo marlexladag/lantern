@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn() }));
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import {
   request,
@@ -15,11 +15,16 @@ import {
 } from './engine';
 
 const invokeMock = vi.mocked(invoke);
+const isTauriMock = vi.mocked(isTauri);
 const listenMock = vi.mocked(listen);
 
 beforeEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
+  // Every existing test exercises the real desktop-app path; only the
+  // dedicated "no IPC bridge" test below overrides this.
+  isTauriMock.mockReset();
+  isTauriMock.mockReturnValue(true);
 });
 
 describe('request', () => {
@@ -84,6 +89,24 @@ describe('request', () => {
       message: 'command engine_request not found',
       data: 'command engine_request not found',
     });
+  });
+
+  // User-found: opening the dev-server URL in a plain browser tab (rather
+  // than the Tauri window) used to reach `invoke()` anyway, which reads
+  // into a bridge Tauri never injects there — a bare
+  // "TypeError: Cannot read properties of undefined (reading 'invoke')"
+  // reaching the user as "Engine error: ...". The same code path is what a
+  // genuinely dead engine would hit in the packaged app, so this has to
+  // fail with an actionable message, not a raw exception, and never call
+  // `invoke` at all.
+  it('rejects with a distinct code and an actionable message when there is no Tauri IPC bridge', async () => {
+    isTauriMock.mockReturnValue(false);
+
+    await expect(request('health')).rejects.toEqual({
+      code: EngineErrorCode.NoIpc,
+      message: 'Lantern must be opened as the desktop app — this page has no connection to the engine in a browser tab.',
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });
 

@@ -1,0 +1,35 @@
+/*
+ * The compact, titlebar-scale version of design/States.dc.html's error
+ * panel: a Kind badge, then the plain-language message, then the numeric
+ * code as native detail — present, but visually last and de-emphasized so
+ * it never leads. This is what a genuinely dead engine looks like in the
+ * packaged app too, not only the dev-server-in-a-browser case, so it uses
+ * the same danger treatment the design gives a blocking failure.
+ */
+.engine-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.engine-error-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  padding: 1px 6px;
+  border-radius: var(--radius-control-sm);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.engine-error-message {
+  color: var(--color-danger);
+}
+
+.engine-error-detail {
+  font-family: var(--font-mono);
+  font-size: var(--text-section);
+  color: var(--color-faint);
+}

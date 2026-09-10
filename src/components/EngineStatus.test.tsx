@@ -74,6 +74,24 @@ it('shows the message and the code when the handshake fails', async () => {
   expect(healthMock).toHaveBeenCalledWith();
 });
 
+// User-found: this is exactly the shape `request()` rejects with when
+// there is no Tauri IPC bridge (dev server opened in a browser tab, or a
+// genuinely dead engine in the packaged app) — it must render as an
+// actionable message with a distinct Kind badge, never a raw exception.
+it('shows the DESKTOP badge and the actionable message when the IPC bridge is absent', async () => {
+  healthMock.mockRejectedValue({
+    code: EngineErrorCode.NoIpc,
+    message: 'Lantern must be opened as the desktop app — this page has no connection to the engine in a browser tab.',
+  });
+
+  render(<EngineStatus />);
+
+  await waitFor(() => {
+    expect(screen.getByText(/must be opened as the desktop app/i)).toBeDefined();
+  });
+  expect(screen.getByText('DESKTOP')).toBeDefined();
+});
+
 it('still renders a readable error when something throws a bare string', async () => {
   healthMock.mockRejectedValue('something went sideways');
 
@@ -191,7 +209,7 @@ it('shows a distinct message when the supervisor gives up', async () => {
     return () => {};
   });
 
-  render(<EngineStatus />);
+  const { container } = render(<EngineStatus />);
   await waitFor(() => expect(screen.getByText(/4242/)).toBeDefined());
 
   await act(async () => {
@@ -199,7 +217,8 @@ it('shows a distinct message when the supervisor gives up', async () => {
   });
 
   expect(screen.getByText(/failed to restart/i)).toBeDefined();
-  expect(screen.queryByText(/^Engine error:/)).toBeNull();
+  // Not the error view's markup — "down" is its own distinct case.
+  expect(container.querySelector('.engine-error')).toBeNull();
 });
 
 it('ignores a stale handshake failure when the engine crashes again before it rejects', async () => {
@@ -218,7 +237,7 @@ it('ignores a stale handshake failure when the engine crashes again before it re
     return () => {};
   });
 
-  render(<EngineStatus />);
+  const { container } = render(<EngineStatus />);
   expect(screen.getByText(/connecting/i)).toBeDefined();
 
   await act(async () => {
@@ -234,7 +253,7 @@ it('ignores a stale handshake failure when the engine crashes again before it re
   });
 
   expect(screen.getByText(/restarting/i)).toBeDefined();
-  expect(screen.queryByText(/^Engine error:/)).toBeNull();
+  expect(container.querySelector('.engine-error')).toBeNull();
 });
 
 it('unregisters the state-change listener if the component unmounts before onStateChange resolves', async () => {

@@ -11,7 +11,7 @@
  * proven by the `health` round-trip, and the event stream is only for later
  * transitions (a crash, a restart, a give-up).
  */
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export interface Health {
@@ -70,6 +70,18 @@ export const EngineErrorCode = {
    * out means the seam was never entered.
    */
   Ipc: -32005,
+  /**
+   * There is no Tauri IPC bridge to call through at all — this page is not
+   * running inside the Lantern desktop app (e.g. the dev server opened
+   * directly in a browser tab). `invoke()` itself would throw a bare
+   * `TypeError` reaching into the bridge Tauri never injected; `request()`
+   * checks `isTauri()` and raises this instead, before `invoke` is ever
+   * attempted, so the failure has a message a person can act on rather than
+   * a stack trace. The same code path is what a genuinely dead engine would
+   * hit in the packaged app if the bridge were ever missing there too, so
+   * this is not purely a development-mode concern.
+   */
+  NoIpc: -32006,
 } as const;
 
 /** Narrowing guard for a value that came back across the IPC boundary. */
@@ -98,6 +110,17 @@ export function toEngineError(value: unknown): EngineError {
 
 /** Calls one engine method. Rejects with an {@link EngineError}, always. */
 export async function request<T>(method: string, params?: unknown): Promise<T> {
+  // isTauri() is Tauri's own supported check for "is a bridge actually
+  // injected here" — cheaper and more future-proof than poking at
+  // `window.__TAURI_INTERNALS__` ourselves, and it is exactly what fails to
+  // exist when this page is opened as a plain web page instead of launched
+  // as the desktop app.
+  if (!isTauri()) {
+    throw {
+      code: EngineErrorCode.NoIpc,
+      message: 'Lantern must be opened as the desktop app — this page has no connection to the engine in a browser tab.',
+    } satisfies EngineError;
+  }
   try {
     return await invoke<T>('engine_request', { method, params: params ?? null });
   } catch (err) {

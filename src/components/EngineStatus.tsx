@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  EngineErrorCode,
   health,
   onStateChange,
   toEngineError,
@@ -7,6 +8,7 @@ import {
   type EngineState,
   type Health,
 } from '../lib/engine';
+import './EngineStatus.css';
 
 type View =
   | { kind: 'connecting' }
@@ -14,6 +16,18 @@ type View =
   | { kind: 'restarting' }
   | { kind: 'down' }
   | { kind: 'error'; error: EngineError };
+
+/**
+ * The Kind badge design/States.dc.html's error-panel treatment puts beside
+ * the plain-language message. Section 11's full `Kind` classification is
+ * driver work that has not landed yet (see the comment on `EngineError`
+ * above) — this only distinguishes the one case the UI can act on
+ * specifically (open the desktop app) from everything else, which is
+ * still an engine-seam failure rather than a raw exception.
+ */
+function engineErrorKind(error: EngineError): string {
+  return error.code === EngineErrorCode.NoIpc ? 'DESKTOP' : 'ENGINE';
+}
 
 export function EngineStatus() {
   const [view, setView] = useState<View>({ kind: 'connecting' });
@@ -88,9 +102,17 @@ export function EngineStatus() {
       // the same way, but `Canceled` must NOT paint an alert once queries
       // can be stopped. Branch on view.error.code (or the Kind that will
       // sit beside it) here rather than adding a second error path.
+      //
+      // Rendered with design/States.dc.html's error-panel treatment — a
+      // Kind badge, the plain-language message leading, and the numeric
+      // code as native detail available but not leading — so a shell
+      // failure never again reaches the user as a raw exception (see
+      // engineErrorKind above and the NoIpc guard in lib/engine.ts).
       return (
-        <p role="alert">
-          Engine error: {view.error.message} (code {view.error.code})
+        <p role="alert" className="engine-error">
+          <span className="engine-error-badge">{engineErrorKind(view.error)}</span>
+          <span className="engine-error-message">{view.error.message}</span>
+          <span className="engine-error-detail">code {view.error.code}</span>
         </p>
       );
     case 'ready':
