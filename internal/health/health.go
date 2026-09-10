@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/marlexladag/tablepluslike/internal/rpc"
+	"github.com/marlexladag/lantern/internal/rpc"
 )
 
 // Info is the health method's result.

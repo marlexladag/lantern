@@ -3146,7 +3146,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tablepluslike"
+name = "lantern"
 version = "0.1.0"
 dependencies = [
  "serde",

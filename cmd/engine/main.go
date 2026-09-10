@@ -11,8 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/marlexladag/tablepluslike/internal/health"
-	"github.com/marlexladag/tablepluslike/internal/rpc"
+	"github.com/marlexladag/lantern/internal/health"
+	"github.com/marlexladag/lantern/internal/rpc"
 )
 
 // Set at build time via -ldflags "-X main.version=... -X main.commit=...".

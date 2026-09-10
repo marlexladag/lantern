@@ -1,6 +1,6 @@
-# tablepluslike
+# Lantern
 
-A cross-platform database client in the shape of TablePlus: a **Tauri v2 +
+A cross-platform desktop database client: a **Tauri v2 +
 React** shell around a **Go engine sidecar**, which the shell drives over
 newline-delimited **JSON-RPC 2.0 on stdio**.
 
@@ -62,7 +62,7 @@ The script cross-compiles six binaries (darwin/linux/windows x amd64/arm64) with
 and commit that the UI displays.
 
 `npm run tauri build` writes installers to `src-tauri/target/release/bundle/`.
-On macOS the sidecar is copied into `tablepluslike.app/Contents/MacOS/engine`
+On macOS the sidecar is copied into `Lantern.app/Contents/MacOS/engine`
 and resolved relative to the executable; in `tauri dev` it is resolved from
 `src-tauri/binaries/` in the source tree instead. Those are different code
 paths, so a change to sidecar packaging is only proven once you have launched
