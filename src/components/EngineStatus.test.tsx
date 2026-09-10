@@ -6,7 +6,7 @@ vi.mock('../lib/engine', () => ({
   onStateChange: vi.fn(),
 }));
 
-import { health, onStateChange } from '../lib/engine';
+import { health, onStateChange, type Health } from '../lib/engine';
 import { EngineStatus } from './EngineStatus';
 
 const healthMock = vi.mocked(health);
@@ -24,6 +24,11 @@ it('shows a connecting state before the handshake completes', () => {
   render(<EngineStatus />);
 
   expect(screen.getByText(/connecting/i)).toBeDefined();
+  // Not just the right text - the component must actually be talking to
+  // the engine client, not rendering a hardcoded string.
+  expect(healthMock).toHaveBeenCalledTimes(1);
+  expect(healthMock).toHaveBeenCalledWith();
+  expect(onStateChangeMock).toHaveBeenCalledWith(expect.any(Function));
 });
 
 it('shows the engine version and pid after a successful handshake', async () => {
@@ -40,6 +45,8 @@ it('shows the engine version and pid after a successful handshake', async () => 
     expect(screen.getByText(/1\.2\.3/)).toBeDefined();
     expect(screen.getByText(/4242/)).toBeDefined();
   });
+  expect(healthMock).toHaveBeenCalledTimes(1);
+  expect(healthMock).toHaveBeenCalledWith();
 });
 
 it('shows the error message when the handshake fails', async () => {
@@ -50,6 +57,8 @@ it('shows the error message when the handshake fails', async () => {
   await waitFor(() => {
     expect(screen.getByText(/engine is not running/i)).toBeDefined();
   });
+  expect(healthMock).toHaveBeenCalledTimes(1);
+  expect(healthMock).toHaveBeenCalledWith();
 });
 
 it('reports a restart and re-runs the handshake when the engine recovers', async () => {
@@ -85,4 +94,86 @@ it('reports a restart and re-runs the handshake when the engine recovers', async
   });
 
   await waitFor(() => expect(screen.getByText(/5555/)).toBeDefined());
+});
+
+it('ignores a stale handshake result when the engine crashes again before it resolves', async () => {
+  // Engine A comes up.
+  healthMock.mockResolvedValueOnce({
+    status: 'ok',
+    version: '1.2.3',
+    commit: 'abc123',
+    pid: 4242,
+  });
+
+  let emit: ((s: 'ready' | 'restarting' | 'down') => void) | undefined;
+  onStateChangeMock.mockImplementation(async (cb) => {
+    emit = cb;
+    return () => {};
+  });
+
+  render(<EngineStatus />);
+  await waitFor(() => expect(screen.getByText(/4242/)).toBeDefined());
+
+  // Engine A crashes.
+  await act(async () => {
+    emit?.('restarting');
+  });
+  expect(screen.getByText(/restarting/i)).toBeDefined();
+
+  // Engine B comes up: a re-handshake is dispatched but deliberately left
+  // unresolved, so we can crash B again before it settles.
+  let resolveStaleHandshake: ((info: Health) => void) | undefined;
+  healthMock.mockReturnValueOnce(
+    new Promise<Health>((resolve) => {
+      resolveStaleHandshake = resolve;
+    }),
+  );
+  await act(async () => {
+    emit?.('ready');
+  });
+
+  // Engine B crashes before that handshake resolves.
+  await act(async () => {
+    emit?.('restarting');
+  });
+  expect(screen.getByText(/restarting/i)).toBeDefined();
+
+  // The stale handshake for the now-dead engine B finally resolves. It
+  // must not overwrite the restarting view with B's outdated pid.
+  await act(async () => {
+    resolveStaleHandshake?.({
+      status: 'ok',
+      version: '1.2.3',
+      commit: 'abc123',
+      pid: 5555,
+    });
+  });
+
+  expect(screen.getByText(/restarting/i)).toBeDefined();
+  expect(screen.queryByText(/5555/)).toBeNull();
+});
+
+it('shows a distinct message when the supervisor gives up', async () => {
+  healthMock.mockResolvedValueOnce({
+    status: 'ok',
+    version: '1.2.3',
+    commit: 'abc123',
+    pid: 4242,
+  });
+
+  let emit: ((s: 'ready' | 'restarting' | 'down') => void) | undefined;
+  onStateChangeMock.mockImplementation(async (cb) => {
+    emit = cb;
+    return () => {};
+  });
+
+  render(<EngineStatus />);
+  await waitFor(() => expect(screen.getByText(/4242/)).toBeDefined());
+
+  await act(async () => {
+    emit?.('down');
+  });
+
+  expect(screen.getByText(/failed to restart/i)).toBeDefined();
+  expect(screen.queryByText(/^Engine error:/)).toBeNull();
 });

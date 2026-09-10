@@ -5,6 +5,7 @@ type View =
   | { kind: 'connecting' }
   | { kind: 'ready'; info: Health }
   | { kind: 'restarting' }
+  | { kind: 'down' }
   | { kind: 'error'; message: string };
 
 export function EngineStatus() {
@@ -14,6 +15,9 @@ export function EngineStatus() {
   // two health() calls can be in flight at once, and network/IPC timing
   // gives no guarantee the older one settles first. Only the result whose
   // generation still matches the latest dispatched handshake is applied.
+  // A restarting/down transition also bumps this even though it does not
+  // dispatch a handshake itself, so a handshake still in flight from
+  // *before* that transition can never land afterward and overwrite it.
   const generation = useRef(0);
 
   const handshake = useCallback(async () => {
@@ -37,13 +41,15 @@ export function EngineStatus() {
 
     void onStateChange((state: EngineState) => {
       if (state === 'restarting') {
+        generation.current++;
         setView({ kind: 'restarting' });
       } else if (state === 'ready') {
         // A fresh process means a fresh PID, so re-handshake rather than
         // trusting the values from the process that just died.
         void handshake();
       } else {
-        setView({ kind: 'error', message: 'Engine is down.' });
+        generation.current++;
+        setView({ kind: 'down' });
       }
     }).then((fn) => {
       if (cancelled) fn();
@@ -61,6 +67,12 @@ export function EngineStatus() {
       return <p>Connecting to engine…</p>;
     case 'restarting':
       return <p>Engine restarting…</p>;
+    case 'down':
+      return (
+        <p role="alert">
+          Engine is down. It failed to restart after repeated attempts and needs manual attention.
+        </p>
+      );
     case 'error':
       return <p role="alert">Engine error: {view.message}</p>;
     case 'ready':
