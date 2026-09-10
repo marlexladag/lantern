@@ -115,6 +115,11 @@ func TestEngineExitsOnSIGTERMWithIdleStdin(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = stdin.Close() })
 
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
@@ -123,18 +128,35 @@ func TestEngineExitsOnSIGTERMWithIdleStdin(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
-	// Give the child time to reach signal.NotifyContext before we signal it.
-	// This is a real fork/exec-vs-signal race, not a fixed startup cost of
-	// the engine itself: a freshly exec'd process is not guaranteed to have
-	// installed its signal handlers yet, and a SIGTERM delivered in that
-	// window hits Go's default (process-terminating) disposition instead of
-	// our handler — measured directly against this binary, that window was
-	// occasionally over 200ms and consistently under 750ms. A production
-	// caller doesn't hit this: the UI's own first action is a `health` call,
-	// which can't succeed before main has already registered the handler far
-	// earlier. 1s leaves comfortable margin without materially slowing the
-	// suite.
-	time.Sleep(1 * time.Second)
+	// Wait for the engine's readiness marker on stderr before signaling,
+	// rather than guessing at a fixed delay: main.go writes "engine: ready"
+	// only after signal.NotifyContext has returned and the handler is
+	// registered, immediately before it starts serving. That is a real
+	// happens-before edge, so once we've read the line, SIGTERM is
+	// guaranteed to hit an installed handler rather than racing Go's
+	// default (process-terminating) disposition for it. stdin is never
+	// touched to get this signal — only stderr.
+	type readyResult struct {
+		line string
+		err  error
+	}
+	readyCh := make(chan readyResult, 1)
+	go func() {
+		line, err := bufio.NewReader(stderr).ReadString('\n')
+		readyCh <- readyResult{line: line, err: err}
+	}()
+
+	select {
+	case res := <-readyCh:
+		if res.err != nil {
+			t.Fatalf("reading readiness marker: %v", res.err)
+		}
+		if got := strings.TrimSpace(res.line); got != "engine: ready" {
+			t.Fatalf("unexpected readiness line: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("engine did not print its readiness marker within 5s")
+	}
 
 	// stdin is deliberately never written to: the fix must not depend on
 	// the stream producing any data.

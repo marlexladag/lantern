@@ -48,6 +48,15 @@ func main() {
 	// instantaneous, so the window is negligible; a future long-running
 	// handler that must clean up (e.g. close a DB transaction) on shutdown
 	// would need this revisited.
+	//
+	// Note: this goroutine is not purely a signal-path mechanism. The
+	// deferred stop() below unconditionally cancels ctx (that's how
+	// signal.NotifyContext's stop works), so it also fires on the normal
+	// stdin-close shutdown path, once Serve has already returned and main is
+	// unwinding — racing harmlessly against main's own return, since by then
+	// Serve's own defer wg.Wait() has already completed and there is nothing
+	// left to lose. Worth remembering for whoever next reasons about
+	// shutdown ordering here.
 	go func() {
 		<-ctx.Done()
 		os.Exit(0)
@@ -55,6 +64,14 @@ func main() {
 
 	srv := rpc.NewServer()
 	srv.Register("health", health.Handler(version, commit))
+
+	// Readiness marker: written once signal handling is registered and the
+	// handler is bound, immediately before Serve starts reading. This is a
+	// real happens-before edge that callers can synchronize on without
+	// touching stdin — used by this package's own SIGTERM test, and by Task
+	// 5's Rust shell, which pipes engine stderr into its own log. Always
+	// stderr, never stdout: stdout is the JSON-RPC protocol stream.
+	fmt.Fprintln(os.Stderr, "engine: ready")
 
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
