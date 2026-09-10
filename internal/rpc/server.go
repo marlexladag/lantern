@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sync"
 )
 
@@ -73,14 +74,15 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 
 		if ctx.Err() != nil {
 			// Reply to this request before returning.
-			reply := func(resp *Response) {
-				if !req.IsNotification() {
-					resp.JSONRPC = Version
-					resp.ID = req.ID
-					_ = enc.Encode(resp)
+			if !req.IsNotification() {
+				if err := enc.Encode(&Response{
+					JSONRPC: Version,
+					ID:      req.ID,
+					Error:   Errorf(CodeInternal, "server shutting down"),
+				}); err != nil {
+					return err
 				}
 			}
-			reply(&Response{Error: Errorf(CodeInternal, "server shutting down")})
 			return nil
 		}
 
@@ -95,7 +97,7 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 func (s *Server) dispatch(ctx context.Context, enc *Encoder, req *Request) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "panic in handler %q: %v\n", req.Method, r)
+			fmt.Fprintf(os.Stderr, "panic in handler %q: %v\n%s\n", req.Method, r, debug.Stack())
 			if !req.IsNotification() {
 				resp := &Response{
 					JSONRPC: Version,
