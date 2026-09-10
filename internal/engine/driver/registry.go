@@ -8,12 +8,18 @@ var (
 	drivers = make(map[string]Driver)
 )
 
-// Register makes a driver available by id, replacing any previous
-// registration. Drivers call this from an init function.
+// Register makes a driver available by id. Drivers call this from an init
+// function, so a duplicate id is a programming error, not a runtime
+// condition — it panics rather than letting the last init silently win,
+// mirroring database/sql.Register.
 func Register(d Driver) {
 	mu.Lock()
 	defer mu.Unlock()
-	drivers[d.ID()] = d
+	id := d.ID()
+	if _, dup := drivers[id]; dup {
+		panic("driver: Register called twice for driver " + id)
+	}
+	drivers[id] = d
 }
 
 // Lookup finds a registered driver.

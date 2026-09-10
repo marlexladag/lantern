@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/schema"
@@ -9,7 +10,7 @@ import (
 
 type stubDriver struct{ id string }
 
-func (s stubDriver) ID() string             { return s.id }
+func (s stubDriver) ID() string                 { return s.id }
 func (s stubDriver) Capabilities() Capabilities { return Capabilities{} }
 func (s stubDriver) Open(context.Context, ConnConfig) (Conn, error) {
 	return nil, nil
@@ -54,4 +55,24 @@ func TestIDsAreSorted(t *testing.T) {
 func TestStubSatisfiesDriver(t *testing.T) {
 	var _ Driver = stubDriver{}
 	var _ schema.TableKind = schema.TableKindTable
+}
+
+// Registration happens from init() across packages, so a duplicate id is a
+// programming error, not a runtime condition: Register must panic rather
+// than let the last init silently win.
+func TestRegisterPanicsOnDuplicateID(t *testing.T) {
+	reset()
+	Register(stubDriver{id: "dup"})
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Register did not panic on a duplicate id")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "dup") {
+			t.Errorf("panic value = %v, want a message naming the duplicate id %q", r, "dup")
+		}
+	}()
+	Register(stubDriver{id: "dup"})
 }
