@@ -11,6 +11,10 @@ dist/
 
 # Tauri
 src-tauri/target/
+# Cross-compiled Go sidecars, rebuilt by ./scripts/build-sidecars.sh.
+# They are build outputs of this repo's own source, and six ~2 MB binaries
+# per commit is not something to carry in git history.
+src-tauri/binaries/
 
 # macOS
 .DS_Store
@@ -20,7 +24,7 @@ design/tablepluslike-interface.html
 
 # SDD execution scratch (ledger, briefs, review packages)
 .superpowers/
-src-tauri/binaries/
+
 # Logs
 logs
 *.log
