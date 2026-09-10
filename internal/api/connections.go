@@ -46,7 +46,7 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 		if p.Connection.Name == "" {
 			return nil, ToRPCError(dberr.New(dberr.KindInvalid, "a connection needs a name"))
 		}
-		if err := checkRequiredFields(p.Connection); err != nil {
+		if err := checkConnectionIsSavable(p.Connection); err != nil {
 			return nil, ToRPCError(err)
 		}
 		saved, err := st.Save(p.Connection, p.Password)
@@ -86,21 +86,31 @@ func RegisterConnections(srv *rpc.Server, st *store.Store) {
 	})
 }
 
-// checkRequiredFields rejects a connection at save time when its own driver
-// reports a required field is missing — before the user commits to a record
-// that can never dial (that used to surface much later, as a confusing "no
-// database file given" the first time something tried to open it). Each
-// driver names its own requirements via Driver.RequiredFields, so adding
-// MySQL's (Host, User, ...) is implementing that method in the mysql
-// package, not editing a condition here.
+// checkConnectionIsSavable rejects a connection at save time when it can
+// never dial: either its driver id is not registered with this engine, or
+// its own driver reports a required field is missing. Both used to surface
+// much later instead, after the record was already durable — a missing
+// field as a confusing "no database file given" the first time something
+// tried to open it, and an unregistered driver only once something called
+// dial. Each driver names its own field requirements via
+// Driver.RequiredFields, so adding MySQL's (Host, User, ...) is implementing
+// that method in the mysql package, not editing a condition here.
 //
-// An unregistered driver id is left alone here — dial's own KindUnsupported
-// check is what reports that, and duplicating it would only be able to
-// disagree with it.
-func checkRequiredFields(rec store.Saved) error {
+// Coordinator-flagged: this used to leave an unregistered driver id alone,
+// on the theory that dial's own KindUnsupported check already reports it and
+// duplicating that check could only disagree with it. That argument missed
+// the actual complaint — the user reported, in person, "it saved a
+// connection that can never work". dial does still check the driver id
+// (session.go and connections.test's own call to dial both still need
+// that — the engine is a separate process with its own JSON-RPC API, and
+// connections.save is not dial's only caller), but by the time dial ever
+// runs, checkConnectionIsSavable's whole point is to have already stopped
+// the record from being committed in the first place. Reporting the same
+// problem twice is fine; reporting it only after the damage is done is not.
+func checkConnectionIsSavable(rec store.Saved) error {
 	d, ok := driver.Lookup(rec.Driver)
 	if !ok {
-		return nil
+		return dberr.New(dberr.KindInvalid, "no driver named "+rec.Driver)
 	}
 	missing := d.RequiredFields(rec.ConnConfig(""))
 	if len(missing) == 0 {

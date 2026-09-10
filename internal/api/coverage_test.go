@@ -258,25 +258,36 @@ func TestConnectionsSaveRejectsAFilelessSqliteConnection(t *testing.T) {
 	}
 }
 
-// The required-fields check is scoped to drivers the engine actually knows
-// about — dial's own KindUnsupported is what reports an unregistered driver,
-// at open time, same as before this change. Field validation for a driver
-// that does not exist yet has nothing to check against.
-func TestConnectionsSaveDoesNotValidateFieldsForAnUnregisteredDriver(t *testing.T) {
+// Coordinator-flagged: the same defect already closed for a missing field
+// (TestConnectionsSaveRejectsAFilelessSqliteConnection, above) — an
+// unregistered driver id used to save successfully and only fail once
+// something actually tried to dial it, by which point the unusable record
+// was already durable. connections.save now rejects it outright. Both
+// assertions matter: an error alone would not prove nothing was committed,
+// which was the whole complaint the user reported in person.
+func TestConnectionsSaveRejectsAnUnregisteredDriver(t *testing.T) {
 	h := newHarness(t)
-	saved, err := h.call(t, "connections.save", map[string]any{
-		"connection": map[string]any{"name": "future", "driver": "mysql"},
+	_, err := h.call(t, "connections.save", map[string]any{
+		"connection": map[string]any{"name": "future", "driver": "nonesuch"},
 		"password":   "",
 	})
+	if err == nil {
+		t.Fatal("connections.save succeeded for an unregistered driver id")
+	}
+	if kind := rpcErrorKind(t, err); kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q", kind, dberr.KindInvalid)
+	}
+
+	listed, err := h.call(t, "connections.list", nil)
 	if err != nil {
-		t.Fatalf("save: %v", err)
+		t.Fatalf("list: %v", err)
 	}
-	var rec store.Saved
-	if err := json.Unmarshal(saved, &rec); err != nil {
-		t.Fatalf("decode saved: %v", err)
+	var records []store.Saved
+	if err := json.Unmarshal(listed, &records); err != nil {
+		t.Fatalf("decode list: %v", err)
 	}
-	if rec.ID == "" {
-		t.Fatal("save returned no id")
+	if len(records) != 0 {
+		t.Fatalf("list = %+v, want no records saved", records)
 	}
 }
 
