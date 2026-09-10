@@ -107,7 +107,14 @@ func (c *conn) Introspect(ctx context.Context) (*schema.Catalog, error) {
 	}
 	defer rows.Close()
 
-	db := schema.Database{Name: databaseName}
+	// Tables starts as a non-nil empty slice, not nil: a database can
+	// legitimately have zero user tables (a brand-new .db, or one holding
+	// only sqlite_* tables, which the WHERE clause above filters out), and
+	// schema.Database.Tables has no omitempty tag — a nil slice would
+	// marshal as "tables":null, which the UI's `tables: Table[]` and its
+	// `.map` over that array cannot tolerate. Mirrors the same reasoning
+	// Columns below and store.Store.List use for their own result slices.
+	db := schema.Database{Name: databaseName, Tables: []schema.Table{}}
 	for rows.Next() {
 		var name, kind string
 		if err := rows.Scan(&name, &kind); err != nil {

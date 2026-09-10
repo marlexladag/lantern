@@ -3,7 +3,10 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
@@ -239,5 +242,71 @@ func TestRequiredFieldsIsSatisfiedWhenFileIsSet(t *testing.T) {
 	got := New().RequiredFields(driver.ConnConfig{Driver: "sqlite", File: "/tmp/x.db"})
 	if len(got) != 0 {
 		t.Errorf("RequiredFields(file set) = %v, want none", got)
+	}
+}
+
+// Coordinator-flagged: a database with zero user tables must marshal
+// "tables":[], not "tables":null. The TypeScript side declares tables:
+// Table[] and calls .map on it while rendering the sidebar, which throws on
+// null. Asserting on the marshalled bytes rather than the struct is
+// deliberate — the struct was never the thing that broke; a nil slice and an
+// empty non-nil slice are indistinguishable by reflection-based struct
+// comparison but marshal to different wire output, and it's the wire output
+// the UI actually consumes.
+func TestIntrospectOnAnEmptyDatabaseMarshalsTablesAsAnEmptyArray(t *testing.T) {
+	// A zero-byte file is itself a valid, empty SQLite database — exactly
+	// the shape of a brand-new .db the user has not put anything in yet.
+	path := filepath.Join(t.TempDir(), "empty.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed empty file: %v", err)
+	}
+
+	cat, err := open(t, path).Introspect(context.Background())
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	raw, err := json.Marshal(cat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"tables":[]`) {
+		t.Errorf("marshalled catalog = %s, want it to contain \"tables\":[]", raw)
+	}
+}
+
+// A database whose only table is sqlite_sequence (left behind once an
+// AUTOINCREMENT table is created and then dropped) must also introspect to
+// an empty, non-nil Tables — introspectSQL's own `NOT LIKE 'sqlite_%'` filter
+// hides it, and this is the case where the query's WHERE clause alone,
+// without this fix, would still leave Tables nil.
+func TestIntrospectOnADatabaseWithOnlySqliteSequenceMarshalsTablesAsAnEmptyArray(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seq-only.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	for _, stmt := range []string{
+		"CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+		"INSERT INTO t DEFAULT VALUES",
+		"DROP TABLE t",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("fixture stmt %q: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture: %v", err)
+	}
+
+	cat, err := open(t, path).Introspect(context.Background())
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	raw, err := json.Marshal(cat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"tables":[]`) {
+		t.Errorf("marshalled catalog = %s, want it to contain \"tables\":[]", raw)
 	}
 }
