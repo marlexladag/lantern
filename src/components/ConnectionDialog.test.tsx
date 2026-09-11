@@ -19,7 +19,7 @@ vi.mock('../lib/connections', async () => {
   };
 });
 
-import { testConnection, saveConnection } from '../lib/connections';
+import { testConnection, saveConnection, type Connection } from '../lib/connections';
 import { ConnectionDialog } from './ConnectionDialog';
 
 const testMock = vi.mocked(testConnection);
@@ -570,4 +570,135 @@ it('renders MySQL and MariaDB as disabled, and SQLite as the only selectable dri
   expect((screen.getByRole('button', { name: 'MySQL' }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'MariaDB' }) as HTMLButtonElement).disabled).toBe(true);
   expect(screen.getByRole('button', { name: 'SQLite' }).getAttribute('aria-pressed')).toBe('true');
+});
+
+/*
+ * C-2. A request abandoned by a close must not land on the form that
+ * replaced it.
+ *
+ * Reported shape: type a path, click Test Connection, press Escape while it
+ * is still in flight, reopen via Add connection. The form is correctly blank
+ * — and then the abandoned request resolves and plants "Reachable" on it, a
+ * verdict asserting reachability about a file being replaced.
+ *
+ * Every test below leaves the request DELIBERATELY unresolved across the
+ * close and the reopen, and settles it afterwards. Awaiting the request
+ * before closing tests the reset instead, which is what let this survive its
+ * first fix.
+ */
+
+/** A promise whose settlement the test decides, rather than the mock. */
+function deferred<T>() {
+  let settle!: { resolve: (v: T) => void; reject: (e: unknown) => void };
+  const promise = new Promise<T>((resolve, reject) => { settle = { resolve, reject }; });
+  return { promise, ...settle };
+}
+
+/** Opens the dialog, fills it, and returns the Add connection button. */
+function openAndFill(name: string, file: string): HTMLElement {
+  const opener = screen.getByRole('button', { name: /add connection/i });
+  fireEvent.click(opener);
+  fill(name, file);
+  return opener;
+}
+
+it('drops a reachability verdict that lands after a close and reopen', async () => {
+  const inFlight = deferred<{ ok: boolean }>();
+  testMock.mockReturnValue(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+
+  fireEvent.click(screen.getByRole('button', { name: /test connection/i }));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  fireEvent.click(opener);
+  expect((screen.getByLabelText(/file/i) as HTMLInputElement).value).toBe('');
+
+  await act(async () => { inFlight.resolve({ ok: true }); });
+
+  expect(screen.queryByText(/reachable/i)).toBeNull();
+  // The abandoned request must not leave the control it disabled disabled
+  // either: a form that cannot be tested is a quieter version of the same
+  // bug.
+  expect((screen.getByRole('button', { name: /test connection/i }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('drops a test-connection throw that lands after a close and reopen', async () => {
+  const inFlight = deferred<{ ok: boolean }>();
+  testMock.mockReturnValue(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+
+  fireEvent.click(screen.getByRole('button', { name: /test connection/i }));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(opener);
+
+  await act(async () => {
+    inFlight.reject({ code: -32020, message: 'the engine died' });
+    await inFlight.promise.catch(() => {});
+  });
+
+  expect(screen.queryByText(/the engine died/i)).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('drops a save rejection that lands after a close and reopen', async () => {
+  const inFlight = deferred<Connection>();
+  saveMock.mockReturnValue(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+
+  fireEvent.click(screen.getByRole('button', { name: /^connect$/i }));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(opener);
+
+  await act(async () => {
+    inFlight.reject({ code: -32020, message: 'boom', data: { kind: 'not_found', message: 'database file does not exist' } });
+    await inFlight.promise.catch(() => {});
+  });
+
+  // The reported half of this one: an in-flight rejection planting a
+  // role="alert" error on a freshly-blank form.
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByRole('dialog')).toBeDefined();
+  // Connect must still work on the new form.
+  expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it('drops a save that succeeds after a close and reopen, leaving the new form open', async () => {
+  const inFlight = deferred<Connection>();
+  saveMock.mockReturnValue(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+
+  fireEvent.click(screen.getByRole('button', { name: /^connect$/i }));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(opener);
+
+  await act(async () => {
+    inFlight.resolve({ id: 'a1', name: 'old', driver: 'sqlite', file: '/tmp/OLD-FILE.db', color: '#3d7d55', read_only: false });
+  });
+
+  // onSaved closes the dialog (App.tsx) — firing it here would shut the
+  // form the user just opened.
+  expect(screen.getByRole('dialog')).toBeDefined();
+});
+
+// Closing is a reset too, not only opening: a verdict left standing on a
+// closed dialog is a verdict standing on whatever opens next, and every
+// close path funnels through the same effect.
+it('clears the form when it closes, not only when it opens', async () => {
+  testMock.mockResolvedValue({ ok: true });
+  render(<AddConnectionHarness />);
+  const opener = openAndFill('local', '/tmp/a.db');
+
+  await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
+  await screen.findByText(/reachable/i);
+
+  fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+  fireEvent.click(opener);
+
+  expect((screen.getByLabelText(/name/i) as HTMLInputElement).value).toBe('');
+  expect(screen.queryByText(/reachable/i)).toBeNull();
 });

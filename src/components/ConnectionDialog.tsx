@@ -52,22 +52,46 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   // `open` going back to false) so a keyboard user lands back where they
   // were instead of at <body>.
   const openerRef = useRef<HTMLElement | null>(null);
+  /**
+   * Guards against a request abandoned by a close landing on the form that
+   * replaced it. Reported shape: type a path, click Test Connection, press
+   * Escape while it is in flight, reopen — the form is correctly blank, and
+   * then the abandoned request resolves and plants "Reachable" on it, a
+   * verdict asserting reachability about a file being replaced. Resetting on
+   * open cannot help: the result arrives after the reset.
+   *
+   * Each handler captures this counter before awaiting and compares after;
+   * the open/close effect bumps it, so anything dispatched before the
+   * boundary is dropped on the other side of it. Same mechanism, same shape,
+   * as EngineStatus's `generation` — a second pattern for the same problem
+   * would be one more thing to keep in step.
+   */
+  const generation = useRef(0);
 
   useEffect(() => {
+    // App.tsx keeps this component mounted for the life of the app and only
+    // flips `open`, so nothing resets on its own: without this, the dialog
+    // reopens holding the last connection's name, file, colour and
+    // production flag — and its "Reachable" verdict, which would then be
+    // asserting reachability about a file the user is in the middle of
+    // replacing. A form that opens pre-filled with someone else's answers is
+    // a nuisance; one that opens with a stale verdict is misleading.
+    //
+    // On CLOSE as well as open, and the generation bump with it: a verdict
+    // left standing on a closed dialog is a verdict standing on whatever
+    // opens next, and `testing`/`saving` left true would reopen the form
+    // with its own buttons disabled by a request nobody is waiting for any
+    // more.
+    generation.current++;
+    setName('');
+    setFile('');
+    setColor(DEFAULT_COLOR);
+    setProduction(false);
+    setTestStatus(null);
+    setFormError(null);
+    setTesting(false);
+    setSaving(false);
     if (open) {
-      // App.tsx keeps this component mounted for the life of the app and
-      // only flips `open`, so nothing resets on its own: without this, the
-      // dialog reopens holding the last connection's name, file, colour and
-      // production flag — and its "Reachable" verdict, which would then be
-      // asserting reachability about a file the user is in the middle of
-      // replacing. A form that opens pre-filled with someone else's answers
-      // is a nuisance; one that opens with a stale verdict is misleading.
-      setName('');
-      setFile('');
-      setColor(DEFAULT_COLOR);
-      setProduction(false);
-      setTestStatus(null);
-      setFormError(null);
       // A type-only narrowing, not a runtime check: `document.activeElement`
       // is always at least `document.body` in a mounted document, and
       // nothing in this app ever focuses a non-HTML element, so there is no
@@ -142,8 +166,10 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     setFormError(null);
     setTesting(true);
     setTestStatus(null);
+    const gen = generation.current;
     try {
       const result = await testConnection(buildConnection(), '');
+      if (gen !== generation.current) return;
       if (result.ok) {
         setTestStatus({ kind: 'ok' });
       } else {
@@ -153,9 +179,13 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
         setTestStatus({ kind: 'error', error: { message: result.error ?? 'Connection failed', kind: result.kind } });
       }
     } catch (err) {
+      if (gen !== generation.current) return;
       setTestStatus({ kind: 'error', error: describeError(err) });
     } finally {
-      setTesting(false);
+      // Guarded like the rest: the close already cleared this, and a newer
+      // request may be in flight by now — clearing its flag would re-enable
+      // a button that is legitimately disabled.
+      if (gen === generation.current) setTesting(false);
     }
   }
 
@@ -176,13 +206,20 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     }
     setFormError(null);
     setSaving(true);
+    const gen = generation.current;
     try {
       const stored = await saveConnection(buildConnection(), '');
+      // onSaved closes the dialog (App.tsx): firing it for an abandoned save
+      // would shut the form the user just opened. The record is saved either
+      // way — the residue is a sidebar list that does not show it until it
+      // next refreshes, which is the better half of the trade.
+      if (gen !== generation.current) return;
       onSaved(stored);
     } catch (err) {
+      if (gen !== generation.current) return;
       setFormError(describeError(err));
     } finally {
-      setSaving(false);
+      if (gen === generation.current) setSaving(false);
     }
   }
 
