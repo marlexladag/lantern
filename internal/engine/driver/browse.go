@@ -44,11 +44,24 @@ type BrowseRequest struct {
 	After []Value `json:"after,omitempty"`
 	// SortToken is the previous page's BrowsePage.SortToken, echoed back
 	// untouched alongside After. It names — opaquely, to the caller — the
-	// sort that produced After, so a driver that supports it can tell a
-	// legitimate continuation apart from a cursor replayed under a sort that
-	// has since changed. A request that carries After with no SortToken, or
-	// a SortToken a driver does not check, is not an error: verification is
-	// an added safety a driver may offer, not a new required pairing.
+	// sort that produced After, which is what lets a driver tell a legitimate
+	// continuation apart from a cursor replayed under a sort that has since
+	// changed.
+	//
+	// Verifying it is REQUIRED of any driver that issues one, not an added
+	// safety it may offer: a request carrying After must be refused, with
+	// KindInvalid, when the token is absent or names a different sort. This
+	// comment used to say the opposite, and the conformance suite is what
+	// settled it — optional verification is not verification. A caller that
+	// dropped the field would get exactly the silent corruption the token
+	// exists to prevent, rows skipped or repeated in the grid with nothing to
+	// indicate it, and there is no legitimate request with After and no
+	// token: every After value came from a page, and every page issues a
+	// token beside it. See drivertest, which asserts both refusals against
+	// the same cursor and pairs them with the positive control that the
+	// cursor IS honoured under the sort it was issued for — a driver that
+	// refused every replay would otherwise satisfy the rejections while being
+	// unable to serve a second page at all.
 	SortToken string `json:"sort_token,omitempty"`
 	// Offset is used only when the driver told the caller it could not
 	// paginate by key — that is, on a page that came back with an Offset and
@@ -87,10 +100,10 @@ type BrowsePage struct {
 	// SortToken is issued alongside Keyset and names — again opaquely, the
 	// caller never decodes it — the sort that produced it. Echo it back as
 	// BrowseRequest.SortToken the next time this page's Keyset is sent as
-	// After; a driver that can verify it will then refuse a cursor replayed
-	// under a different sort instead of silently paging from a boundary that
-	// sort never produced. Absent exactly when Keyset is: there is nothing
-	// to name the sort of when there is no cursor to replay.
+	// After, and the driver will refuse a cursor replayed under a different
+	// sort instead of silently paging from a boundary that sort never
+	// produced. Absent exactly when Keyset is: there is nothing to name the
+	// sort of when there is no cursor to replay.
 	SortToken string `json:"sort_token,omitempty"`
 	// Exhausted is true when fewer rows than Limit came back, so the caller
 	// can stop asking.
