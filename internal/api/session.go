@@ -90,14 +90,36 @@ func (s *Sessions) remove(id string) (driver.Conn, bool) {
 // documented accepted trade like the signal path's — would silently
 // reintroduce this window with no such justification; this type does
 // nothing on its own to stop that.
+//
+// The Closes run concurrently, one goroutine per conn, because a caller
+// that bounds this call bounds the WHOLE call: cmd/engine's
+// closeSessionsOnSignal gives it sessionCloseTimeout and then abandons it.
+// Closed sequentially, a single driver Close that never returned would
+// consume that entire budget and every session behind it in the map would
+// simply never be reached — the process still exited on time, but healthy
+// connections that would have flushed and unlocked in microseconds died
+// unclosed instead. Concurrently, one hung Close costs only itself. The
+// alternative — bounding each Close individually in here — was not taken:
+// it would put a timeout policy in a type that has no business choosing
+// one, and would still serialise the wait.
 func (s *Sessions) CloseAll() {
 	s.mu.Lock()
 	conns := s.conns
 	s.conns = make(map[string]driver.Conn)
 	s.mu.Unlock()
+	var wg sync.WaitGroup
 	for _, c := range conns {
-		_ = c.Close()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.Close()
+		}()
 	}
+	// CloseAll still returns only once every Close has returned, so the
+	// deferred call in cmd/engine keeps meaning what it always meant. What
+	// changed is that a hung Close no longer holds the others hostage while
+	// it does.
+	wg.Wait()
 }
 
 type openParams struct {

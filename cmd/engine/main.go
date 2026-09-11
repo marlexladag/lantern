@@ -50,10 +50,14 @@ const sessionCloseTimeout = 2 * time.Second
 //
 // If timeout elapses before every Close returns, this returns anyway and
 // the goroutine still running sess.CloseAll is abandoned along with
-// whatever database handle it was closing — a leaked handle the OS reclaims
-// on process exit, traded deliberately against a process that refuses to
+// whatever handles were still mid-Close — leaked handles the OS reclaims on
+// process exit, traded deliberately against a process that refuses to
 // honour a termination signal, which is the entire reason the caller's
-// signal-watcher goroutine exists (see its own comment).
+// signal-watcher goroutine exists (see its own comment). Only the handles
+// still mid-Close are lost, not every handle the abandoned goroutine had
+// yet to reach: CloseAll closes concurrently, precisely so that this
+// timeout costs one slow driver rather than every session behind it (see
+// CloseAll's own doc comment).
 func closeSessionsOnSignal(sess *api.Sessions, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
@@ -101,9 +105,14 @@ func main() {
 	// is no longer hypothetical: session.open (internal/api/session.go)
 	// dials a real database connection and keeps it open for the life of
 	// the session. closeSessionsOnSignal below closes every session that is
-	// already fully registered in sess.conns at the moment of signal,
-	// bounded by sessionCloseTimeout so a hung Close cannot block this
-	// goroutine — and therefore the process — from exiting.
+	// already fully registered in sess.conns at the moment of signal, each
+	// in its own goroutine, bounded by sessionCloseTimeout so a hung Close
+	// cannot block this goroutine — and therefore the process — from
+	// exiting. Concurrently and not in a loop for exactly that reason: the
+	// timeout bounds the whole call, so a sequential loop would let the
+	// first Close that never returns spend the entire budget while every
+	// session behind it went unreached — and "closes every session" would
+	// be false in precisely the scenario this code exists for.
 	//
 	// This is deliberately weaker than main's own `defer sess.CloseAll()`
 	// further down: that defer only ever runs once rpc.Server.Serve has
@@ -112,14 +121,24 @@ func main() {
 	// in flight (see sess.CloseAll's own doc comment for why that matters).
 	// This goroutine cannot offer the same guarantee: Serve may never
 	// return on its own while stdin sits idle, so there is nothing for it
-	// to wait on before calling closeSessionsOnSignal. In the narrow window
-	// where a session.open call is between a successful dial and
-	// registering its connection (sess.add) — which spans that call's own
-	// Introspect — a signal landing in that instant can still leak that one
-	// connection, exactly the gap sess.CloseAll's own comment warns a
-	// drain-guarantee-free caller would reopen. Accepted deliberately: this
-	// closes every session that is not mid-open, which is a strict
-	// improvement over the previous behaviour of closing none of them.
+	// to wait on before calling closeSessionsOnSignal. A session.open call
+	// in flight when the signal lands can still leak its connection,
+	// exactly the gap sess.CloseAll's own comment warns a
+	// drain-guarantee-free caller would reopen — and the window is as wide
+	// as the shutdown itself, not an instant. Two shapes of it:
+	//
+	//	a call between a successful dial and sess.add — which spans that
+	//	call's own Introspect — adds its connection to the map CloseAll
+	//	already swapped away, and nothing ever reaches it again;
+	//
+	//	a call that reaches sess.add at any point AFTER that swap — anywhere
+	//	in the sessionCloseTimeout-wide span while the closes are running,
+	//	or after they finish — registers into the fresh map, which nothing
+	//	will close before os.Exit(0).
+	//
+	// Accepted deliberately: this closes every session that was registered
+	// when the signal arrived, which is a strict improvement over the
+	// previous behaviour of closing none of them.
 	//
 	// Note: this goroutine is not purely a signal-path mechanism. The
 	// deferred stop() below unconditionally cancels ctx (that's how

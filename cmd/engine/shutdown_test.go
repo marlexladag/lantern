@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -38,11 +39,38 @@ import (
 // optionally be made to hang until the test releases it — simulating a
 // database handle whose Close never returns, which closeSessionsOnSignal
 // must not wait out.
+//
+// announces and awaits together let a test require that two Closes OVERLAP:
+// one conn announces that its Close has begun, another refuses to finish
+// until it hears that announcement. A sequential CloseAll cannot satisfy
+// that pairing in either map-iteration order, which is what makes the C-3
+// test below deterministic rather than a coin flip on Go's randomised map
+// ordering.
 type spyConn struct {
 	closed atomic.Bool
 	// block, when non-nil, is received from before Close returns. Leave it
 	// nil for an ordinary, immediately-returning Close.
 	block chan struct{}
+	// announces, when non-nil, is closed the instant Close begins.
+	announces chan struct{}
+	// awaits, when non-nil, must be closed before Close will return —
+	// normally another conn's announces.
+	awaits chan struct{}
+	// abandon releases a Close still parked on awaits or block when the test
+	// ends, so a deliberately stranded goroutine unwinds during cleanup
+	// instead of leaking for the rest of the binary's life. newSpyConn sets
+	// it; a nil channel simply never fires, which is why every select below
+	// can name it unconditionally.
+	abandon chan struct{}
+}
+
+// newSpyConn returns a conn whose Close returns immediately. Set block,
+// announces or awaits on the result to make it hang or rendezvous.
+func newSpyConn(t *testing.T) *spyConn {
+	t.Helper()
+	c := &spyConn{abandon: make(chan struct{})}
+	t.Cleanup(func() { close(c.abandon) })
+	return c
 }
 
 func (c *spyConn) Ping(context.Context) error { return nil }
@@ -62,8 +90,20 @@ func (c *spyConn) Query(context.Context, string, ...any) (driver.Cursor, error) 
 func (c *spyConn) Quote(ident string) string { return ident }
 
 func (c *spyConn) Close() error {
+	if c.announces != nil {
+		close(c.announces)
+	}
+	if c.awaits != nil {
+		select {
+		case <-c.awaits:
+		case <-c.abandon:
+		}
+	}
 	if c.block != nil {
-		<-c.block
+		select {
+		case <-c.block:
+		case <-c.abandon:
+		}
 	}
 	c.closed.Store(true)
 	return nil
@@ -77,8 +117,8 @@ type spyDriver struct {
 	conn *spyConn
 }
 
-func (d spyDriver) ID() string                        { return d.id }
-func (d spyDriver) Capabilities() driver.Capabilities { return driver.Capabilities{} }
+func (d spyDriver) ID() string                                { return d.id }
+func (d spyDriver) Capabilities() driver.Capabilities         { return driver.Capabilities{} }
 func (d spyDriver) RequiredFields(driver.ConnConfig) []string { return nil }
 func (d spyDriver) Open(context.Context, driver.ConnConfig) (driver.Conn, error) {
 	return d.conn, nil
@@ -86,24 +126,15 @@ func (d spyDriver) Open(context.Context, driver.ConnConfig) (driver.Conn, error)
 
 var _ driver.Driver = spyDriver{}
 
-// openSpySession registers conn under a driver id unique to the calling
-// test (driver.Register panics on a repeat id), saves one connection using
-// it, and drives session.open for real (through rpc.Server, the same
-// handler main() wires up) so conn ends up genuinely held open inside a
-// fresh *api.Sessions — not just placed there by reaching into an
-// unexported field.
-func openSpySession(t *testing.T, conn *spyConn) *api.Sessions {
+// openSpySessions registers each conn under a driver id unique to the
+// calling test and its position (driver.Register panics on a repeat id),
+// saves one connection per driver, and drives session.open for real
+// (through rpc.Server, the same handler main() wires up) so every conn ends
+// up genuinely held open inside one fresh *api.Sessions — not just placed
+// there by reaching into an unexported field.
+func openSpySessions(t *testing.T, conns ...*spyConn) *api.Sessions {
 	t.Helper()
-	id := "spy:" + t.Name()
-	driver.Register(spyDriver{id: id, conn: conn})
-
-	dir := t.TempDir()
-	st := store.New(filepath.Join(dir, "connections.json"), store.NewMemoryKeyring())
-	rec, err := st.Save(store.Saved{Name: "fixture", Driver: id, Color: "#3d7d55"}, "")
-	if err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
+	st := store.New(filepath.Join(t.TempDir(), "connections.json"), store.NewMemoryKeyring())
 	sess := api.NewSessions()
 	srv := rpc.NewServer()
 	api.RegisterSession(srv, st, sess)
@@ -112,12 +143,20 @@ func openSpySession(t *testing.T, conn *spyConn) *api.Sessions {
 	if !ok {
 		t.Fatal("session.open is not registered")
 	}
-	params, err := json.Marshal(map[string]string{"connection_id": rec.ID})
-	if err != nil {
-		t.Fatalf("marshal params: %v", err)
-	}
-	if _, err := h(context.Background(), params); err != nil {
-		t.Fatalf("session.open: %v", err)
+	for i, conn := range conns {
+		id := fmt.Sprintf("spy:%s#%d", t.Name(), i)
+		driver.Register(spyDriver{id: id, conn: conn})
+		rec, err := st.Save(store.Saved{Name: fmt.Sprintf("fixture-%d", i), Driver: id, Color: "#3d7d55"}, "")
+		if err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		params, err := json.Marshal(map[string]string{"connection_id": rec.ID})
+		if err != nil {
+			t.Fatalf("marshal params: %v", err)
+		}
+		if _, err := h(context.Background(), params); err != nil {
+			t.Fatalf("session.open: %v", err)
+		}
 	}
 	return sess
 }
@@ -127,8 +166,8 @@ func openSpySession(t *testing.T, conn *spyConn) *api.Sessions {
 // completed, which the pre-fix bare os.Exit(0) also achieves without
 // closing anything.
 func TestCloseSessionsOnSignalClosesAnOpenSession(t *testing.T) {
-	conn := &spyConn{}
-	sess := openSpySession(t, conn)
+	conn := newSpyConn(t)
+	sess := openSpySessions(t, conn)
 
 	closeSessionsOnSignal(sess, time.Second)
 
@@ -141,12 +180,11 @@ func TestCloseSessionsOnSignalClosesAnOpenSession(t *testing.T) {
 // shutdown. This is the adversarial fixture A2-2 asks for — no existing
 // test before this one ever produces a Close call that hangs.
 func TestCloseSessionsOnSignalDoesNotWaitForAHungClose(t *testing.T) {
-	conn := &spyConn{block: make(chan struct{})}
-	// Released only once the test is done asserting, so the background
-	// Close this leaves running unblocks during cleanup instead of leaking
-	// for the rest of the test binary's life.
-	t.Cleanup(func() { close(conn.block) })
-	sess := openSpySession(t, conn)
+	conn := newSpyConn(t)
+	// Never closed by the test: newSpyConn's abandon channel releases the
+	// parked Close during cleanup, once the test is done asserting.
+	conn.block = make(chan struct{})
+	sess := openSpySessions(t, conn)
 
 	start := time.Now()
 	closeSessionsOnSignal(sess, 50*time.Millisecond)
@@ -161,5 +199,47 @@ func TestCloseSessionsOnSignalDoesNotWaitForAHungClose(t *testing.T) {
 	// happened to finish quickly.
 	if conn.closed.Load() {
 		t.Error("conn.Close cannot have returned yet; block is still open")
+	}
+}
+
+// C-3 repro. CloseAll used to close sequentially, so the first Close that
+// never returned stranded every session behind it: the process still exited
+// on time (closeSessionsOnSignal bounds the whole loop), but the healthy
+// connections it was supposed to close were simply never reached, and their
+// handles died with the process instead of being flushed and unlocked.
+//
+// The pairing below is what makes this deterministic. Go randomises map
+// iteration order, so the obvious fixture — one hung conn, one healthy one,
+// assert the healthy one closed — passes half the time against the very bug
+// it exists to catch, depending on which conn the sequential loop happens to
+// reach first. Instead the healthy conn refuses to finish until it has heard
+// the hung one's Close begin, which no sequential order can deliver:
+//
+//	hung first    the hung Close parks forever, the healthy one is never
+//	              reached, nothing is closed
+//	healthy first the healthy Close waits for an announcement that can only
+//	              come after it returns, so both park, and nothing is closed
+//
+// Only overlapping Closes satisfy it.
+func TestCloseSessionsOnSignalDoesNotLetOneHungCloseStrandTheRest(t *testing.T) {
+	hung := newSpyConn(t)
+	hung.announces = make(chan struct{})
+	hung.block = make(chan struct{})
+
+	healthy := newSpyConn(t)
+	healthy.awaits = hung.announces
+
+	sess := openSpySessions(t, hung, healthy)
+
+	closeSessionsOnSignal(sess, 200*time.Millisecond)
+
+	if !healthy.closed.Load() {
+		t.Error("the healthy session was NOT closed — one hung Close stranded it")
+	}
+	// The hung one is still parked on block, which nothing has closed: the
+	// timeout is what ended the wait, not the Close finishing. Without this,
+	// a CloseAll that simply got lucky on timing would look the same.
+	if hung.closed.Load() {
+		t.Error("the hung Close cannot have returned; nothing has released it")
 	}
 }
