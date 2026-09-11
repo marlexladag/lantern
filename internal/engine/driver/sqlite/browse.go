@@ -2,13 +2,12 @@ package sqlite
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"strconv"
 	"strings"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
+	"github.com/marlexladag/lantern/internal/engine/driver/keyset"
 	"github.com/marlexladag/lantern/internal/engine/schema"
 )
 
@@ -43,9 +42,9 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	//
 	// Folded, because SQLite resolves schema and table names
 	// case-insensitively and this driver has to resolve them the same way
-	// it resolves column names (see columnNamed). "MAIN" named the database
+	// it resolves column names (see keyset.ColumnNamed). "MAIN" named the database
 	// this connection has open and was refused as missing.
-	database := foldIdent(req.Database)
+	database := keyset.FoldIdent(req.Database)
 	if database != "" && database != databaseName {
 		return nil, dberr.New(dberr.KindNotFound, "no such database: "+req.Database)
 	}
@@ -103,7 +102,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	}
 	if byKey {
 		for _, t := range order {
-			sel = append(sel, t.expr)
+			sel = append(sel, t.Expr)
 		}
 		// typeof() rides along so the keyset can be judged on the value's
 		// STORAGE CLASS rather than on its column's declared type. It has to
@@ -114,7 +113,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 		// binding that back compares TEXT against BLOB storage, which SQLite
 		// sorts every blob above.
 		for _, t := range order {
-			sel = append(sel, "typeof("+t.expr+")")
+			sel = append(sel, "typeof("+t.Expr+")")
 		}
 	}
 
@@ -145,11 +144,11 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: this cursor is missing the sort it was issued for; start again from the first page")
 		}
-		if req.SortToken != sortToken(database, req.Table, order) {
+		if req.SortToken != keyset.Token(database, req.Table, order) {
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: this cursor was issued for a different sort; start again from the first page")
 		}
-		pred, pargs, err := keysetPredicate(order, req.After)
+		pred, pargs, err := keyset.Predicate(order, req.After, keysetArg)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +156,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	}
 
 	stmt := "SELECT " + strings.Join(sel, ", ") +
-		" FROM " + c.Quote(req.Table) + where + orderBy(order) + " LIMIT ?"
+		" FROM " + c.Quote(req.Table) + where + keyset.OrderBy(order) + " LIMIT ?"
 	args = append(args, req.Limit)
 	if !byKey {
 		stmt += " OFFSET ?"
@@ -204,7 +203,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 		page.Offset = req.Offset + len(rows)
 	case !page.Exhausted:
 		last := rows[len(rows)-1]
-		keyset := make([]driver.Value, len(order))
+		keys := make([]driver.Value, len(order))
 		for i := range order {
 			// A Keyset is a promise that handing it back in After produces
 			// the next page, and a blob cannot keep it. SQLite's affinities
@@ -239,10 +238,10 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 						"browse: a key column holds a value that cannot be carried in a cursor")
 				}
 			}
-			keyset[i] = v
+			keys[i] = v
 		}
-		page.Keyset = keyset
-		page.SortToken = sortToken(database, req.Table, order)
+		page.Keyset = keys
+		page.SortToken = keyset.Token(database, req.Table, order)
 	}
 	return page, nil
 }
@@ -251,102 +250,6 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 // four siblings — null, integer, real, text — all map onto a driver.Value
 // that keysetArg can bind back, which is why only this one is turned away.
 const blobClass = "blob"
-
-// orderTerm is one ORDER BY term with its column already rendered as SQL.
-type orderTerm struct {
-	expr string
-	desc bool
-}
-
-// sortToken fingerprints the ordering a page was actually produced under, so
-// a caller's cursor can be checked against the sort that is CURRENTLY being
-// requested and not just trusted to still apply.
-//
-// It is built from order — the RESOLVED ordering planOrder returns, complete
-// with whatever tiebreaker it appended — rather than from req.Sort. req.Sort
-// is empty on the ordinary default-sort path (see planOrder's doc comment),
-// so hashing it directly would produce the same token for every table's
-// default sort; the resolved ordering is the thing that actually determines
-// what "after" means for a given cursor, and it is what has to match.
-//
-// table is folded in for the same reason: two tables can share a column
-// name and produce identical order terms, and a token that could not tell
-// them apart would let a cursor from one page the other.
-//
-// database is folded in for the same reason as table, and comes from the
-// REQUEST rather than from this package's databaseName constant. The two
-// are equivalent for SQLite, which has exactly one database — but a driver
-// copied from this one for an engine that has many would then hash every
-// schema's tables identically, and two same-named tables in different
-// schemas would accept each other's cursors. The defect would be
-// introduced by the copy and invisible in the original.
-//
-// crypto/sha256 is used here only for its collision resistance across the
-// handful of orderings one table can produce — this is a consistency check
-// against an accidental mismatch (the caller's own stale cursor), not a
-// security boundary, so the digest is truncated: nothing is lost by a
-// shorter token that a legitimate caller could still not have predicted, and
-// nothing would be gained by a longer one that only an adversary deliberately
-// searching for a collision would care about.
-//
-// Every field is LENGTH-PREFIXED rather than separated by a byte, so the
-// encoding is injective for any field content whatsoever. A separator has
-// to argue that it cannot appear inside a field, and the argument this
-// function used to make was both wrong and load-bearing: it claimed the
-// table name is "only ever hashed, never executed", when Browse quotes it
-// into the page query and hasRowid into the rowid probe. The separator
-// scheme was sound only because SQLite refuses a NUL in an identifier —
-// executed, table "a" sorted by a column "b" hashed identically to a table
-// named "a\0b\0a" with no sort — and that premise is exactly what a MySQL
-// or Postgres copy of this function would inherit without rechecking. A
-// length prefix needs no premise.
-func sortToken(database, table string, order []orderTerm) string {
-	var b strings.Builder
-	// Folded on the way in, not at the call site, so every caller of this
-	// function gets the case-insensitivity SQLite itself applies.
-	hashField(&b, foldIdent(database))
-	hashField(&b, foldIdent(table))
-	for _, t := range order {
-		// expr is not folded: it is c.Quote(col.Name) built from the
-		// CATALOG's own spelling, or one of the three fixed rowid spellings,
-		// so it is already canonical however the caller spelled the column.
-		hashField(&b, t.expr)
-		if t.desc {
-			hashField(&b, "desc")
-		} else {
-			hashField(&b, "asc")
-		}
-	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])[:16]
-}
-
-// hashField writes one field of a token's input as its byte length, a
-// colon, and then the field. Reading it back is unambiguous — the length
-// says exactly how far the field runs — so no two different field sequences
-// can produce the same bytes, whatever the fields contain.
-func hashField(b *strings.Builder, s string) {
-	b.WriteString(strconv.Itoa(len(s)))
-	b.WriteByte(':')
-	b.WriteString(s)
-}
-
-// foldIdent renders an identifier in the case SQLite compares it in.
-//
-// ASCII only, which is SQLite's own rule: its built-in identifier
-// comparison folds A-Z and leaves every other byte alone, so "Ä" and "ä"
-// name DIFFERENT tables there. strings.ToLower would fold them together and
-// let one table's cursor page the other — the opposite of the false
-// refusal this exists to fix, and a worse one, since it corrupts rather
-// than refuses.
-func foldIdent(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return r
-	}, s)
-}
 
 // planOrder resolves the request's sort into a total ordering where it can,
 // and reports whether the result can be paged by key.
@@ -357,20 +260,20 @@ func foldIdent(s string) string {
 // BrowseRequest.After may arrive with an empty Sort — the ordinary shape of a
 // second page, since a Keyset is opaque to the caller, who only echoes it
 // back.
-func (c *conn) planOrder(ctx context.Context, req driver.BrowseRequest, cols []schema.Column) ([]orderTerm, bool, error) {
-	var order []orderTerm
+func (c *conn) planOrder(ctx context.Context, req driver.BrowseRequest, cols []schema.Column) ([]keyset.Term, bool, error) {
+	var order []keyset.Term
 	// safe tracks whether every ordering column's value survives the trip out
 	// through driver.Value and back in as a bound parameter. A column that
 	// fails this still gets to ORDER BY — the ordering is what makes offset
 	// paging stable — it just cannot carry a keyset.
 	safe := true
 	add := func(col schema.Column, desc bool) {
-		order = append(order, orderTerm{expr: c.Quote(col.Name), desc: desc})
+		order = append(order, keyset.Term{Expr: c.Quote(col.Name), Desc: desc})
 		safe = safe && keysetSafe(col.DataType)
 	}
 
 	for _, k := range req.Sort {
-		col, ok := columnNamed(cols, k.Column)
+		col, ok := keyset.ColumnNamed(cols, k.Column)
 		if !ok {
 			// Caught here rather than left to SQLite, which reports a bad
 			// ORDER BY column as an ordinary syntax error — true of the SQL
@@ -381,7 +284,7 @@ func (c *conn) planOrder(ctx context.Context, req driver.BrowseRequest, cols []s
 		add(col, k.Desc)
 	}
 	if len(req.Sort) == 0 {
-		for _, col := range primaryKey(cols) {
+		for _, col := range keyset.PrimaryKey(cols) {
 			add(col, false)
 		}
 	}
@@ -399,18 +302,18 @@ func (c *conn) planOrder(ctx context.Context, req driver.BrowseRequest, cols []s
 		// redundancy costs nothing when the key IS the rowid: EXPLAIN QUERY
 		// PLAN on `ORDER BY id, rowid` over an INTEGER PRIMARY KEY table
 		// reports a plain SCAN, with no sorting step added.
-		order = append(order, orderTerm{expr: alias})
+		order = append(order, keyset.Term{Expr: alias})
 	case aliased:
 		// No rowid: a view, or a WITHOUT ROWID table. A WITHOUT ROWID table
 		// must declare a PRIMARY KEY and SQLite enforces it NOT NULL, so
 		// there the primary key IS a sound tiebreaker. A view has no key at
 		// all and falls through to offset paging.
-		pk := primaryKey(cols)
+		pk := keyset.PrimaryKey(cols)
 		if len(pk) == 0 {
 			return order, false, nil
 		}
 		for _, col := range pk {
-			if !hasTerm(order, c.Quote(col.Name)) {
+			if !keyset.HasTerm(order, c.Quote(col.Name)) {
 				add(col, false)
 			}
 		}
@@ -431,7 +334,7 @@ var rowidAliases = [...]string{"rowid", "_rowid_", "oid"}
 
 func freeRowidAlias(cols []schema.Column) (string, bool) {
 	for _, alias := range rowidAliases {
-		if _, taken := columnNamed(cols, alias); !taken {
+		if _, taken := keyset.ColumnNamed(cols, alias); !taken {
 			return alias, true
 		}
 	}
@@ -510,11 +413,14 @@ func keysetSafe(declType string) bool {
 	return false // NUMERIC
 }
 
-// keysetArg turns one keyset value back into a bound parameter.
+// keysetArg turns one keyset value back into a bound parameter. It is this
+// driver's keyset.Bind, and it is the ONLY thing the neutral keyset package
+// needs from an engine: which values a cursor can carry is per-engine, and
+// everything else about the predicate is not.
 //
 // A NULL never arrives here: its comparison is expressed structurally, by IS
 // NULL and IS NOT NULL, because `col > NULL` evaluates to NULL and would
-// quietly drop every row rather than compare it. See afterTerm.
+// quietly drop every row rather than compare it. See keyset.Predicate.
 //
 // What it accepts is the other half of the promise a Keyset makes. Every
 // value this driver hands out has already been screened twice — keysetSafe
@@ -544,130 +450,4 @@ func keysetArg(v driver.Value) (any, error) {
 	// not reconstruct the original repeats or skips rows silently.
 	return nil, dberr.New(dberr.KindUnsupported,
 		"browse: this cursor cannot be paged by key")
-}
-
-// keysetPredicate renders "strictly after the row this cursor names", in the
-// ordering order describes.
-//
-// It is an explicit lexicographic chain rather than SQLite's row-value
-// comparison, `(a, b) > (?, ?)`, which is the obvious way to write it and is
-// wrong here. A row value comparison yields NULL, not true or false, as soon
-// as it meets a NULL it cannot decide on — so WHERE drops the row, and a
-// sort on a nullable column loses every row past the first page boundary
-// that lands in the NULLs. Verified rather than assumed: on a table whose
-// sort column is entirely NULL, `WHERE (note, id) > (NULL, 0)` matches zero
-// of three rows. The chain below says what row values cannot, that NULL
-// sorts before every value ascending and after every value descending, which
-// is exactly how SQLite's own ORDER BY treats it.
-//
-// The chain is the standard one — after the first key, or tied on it and
-// after the second, or tied on both and after the third — which costs
-// O(n²) terms in the number of sort keys. n is the caller's sort plus one
-// tiebreaker, so it is two or three in practice.
-func keysetPredicate(order []orderTerm, after []driver.Value) (string, []any, error) {
-	clauses := make([]string, len(order))
-	var args []any
-	for i := range order {
-		terms := make([]string, 0, i+1)
-		for j := 0; j < i; j++ {
-			term, arg := equalTerm(order[j], after[j])
-			terms, args = append(terms, term), appendArg(args, arg)
-		}
-		term, arg, err := afterTerm(order[i], after[i])
-		if err != nil {
-			return "", nil, err
-		}
-		terms, args = append(terms, term), appendArg(args, arg)
-		clauses[i] = "(" + strings.Join(terms, " AND ") + ")"
-	}
-	return strings.Join(clauses, " OR "), args, nil
-}
-
-// equalTerm renders "this column holds exactly the cursor's value".
-//
-// It cannot fail: every value reaching it was already accepted by afterTerm
-// for an earlier position in this same cursor.
-func equalTerm(t orderTerm, v driver.Value) (string, any) {
-	if v.Kind == driver.ValueNull {
-		return t.expr + " IS NULL", nil
-	}
-	arg, _ := keysetArg(v)
-	return t.expr + " = ?", arg
-}
-
-// afterTerm renders "this column sorts strictly after the cursor's value",
-// in the direction this term is ordered.
-func afterTerm(t orderTerm, v driver.Value) (string, any, error) {
-	if v.Kind == driver.ValueNull {
-		if t.desc {
-			// Descending, NULL sorts last, so no row follows it on this term
-			// alone. The chain's later clauses still carry the rows tied at
-			// NULL, matched by equalTerm's IS NULL and separated by the
-			// tiebreaker.
-			return "0", nil, nil
-		}
-		return t.expr + " IS NOT NULL", nil, nil
-	}
-	arg, err := keysetArg(v)
-	if err != nil {
-		return "", nil, err
-	}
-	if t.desc {
-		// OR IS NULL because descending puts the NULLs after every value, and
-		// `col < ?` alone evaluates to NULL for them and drops them.
-		return "(" + t.expr + " < ? OR " + t.expr + " IS NULL)", arg, nil
-	}
-	return t.expr + " > ?", arg, nil
-}
-
-// appendArg keeps the bound parameters in step with the placeholders: a term
-// built for a NULL has none.
-func appendArg(args []any, arg any) []any {
-	if arg == nil {
-		return args
-	}
-	return append(args, arg)
-}
-
-func orderBy(order []orderTerm) string {
-	if len(order) == 0 {
-		return ""
-	}
-	parts := make([]string, len(order))
-	for i, t := range order {
-		parts[i] = t.expr + " ASC"
-		if t.desc {
-			parts[i] = t.expr + " DESC"
-		}
-	}
-	return " ORDER BY " + strings.Join(parts, ", ")
-}
-
-// columnNamed matches the way SQLite does, which is case-insensitively.
-func columnNamed(cols []schema.Column, name string) (schema.Column, bool) {
-	for _, col := range cols {
-		if strings.EqualFold(col.Name, name) {
-			return col, true
-		}
-	}
-	return schema.Column{}, false
-}
-
-func primaryKey(cols []schema.Column) []schema.Column {
-	var pk []schema.Column
-	for _, col := range cols {
-		if col.PrimaryKey {
-			pk = append(pk, col)
-		}
-	}
-	return pk
-}
-
-func hasTerm(order []orderTerm, expr string) bool {
-	for _, t := range order {
-		if t.expr == expr {
-			return true
-		}
-	}
-	return false
 }

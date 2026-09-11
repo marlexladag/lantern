@@ -12,6 +12,7 @@ import (
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
+	"github.com/marlexladag/lantern/internal/engine/driver/keyset"
 
 	_ "modernc.org/sqlite"
 )
@@ -1274,7 +1275,7 @@ func TestBrowseRefusesAKeysetHoldingTextThatIsNotUTF8(t *testing.T) {
 
 // -- fix wave D-4: what the cursor is named after ------------------------
 
-// The separator reasoning sortToken used to rest on was only accidentally
+// The separator reasoning keyset.Token used to rest on was only accidentally
 // sound. Fields were joined with a single NUL byte, and the argument for
 // that being unambiguous was that a NUL cannot appear in a SQLite
 // identifier — true, and unreachable through Browse, but the reasoning is
@@ -1287,15 +1288,15 @@ func TestBrowseRefusesAKeysetHoldingTextThatIsNotUTF8(t *testing.T) {
 // length-prefixed, which is injective for ANY field content and needs no
 // premise about what the fields can hold.
 func TestSortTokenCannotBeCollidedByMovingASeparator(t *testing.T) {
-	one := sortToken("main", "a", []orderTerm{{expr: "b"}})
-	two := sortToken("main", "a\x00b\x00a", nil)
+	one := keyset.Token("main", "a", []keyset.Term{{Expr: "b"}})
+	two := keyset.Token("main", "a\x00b\x00a", nil)
 	if one == two {
 		t.Errorf("two different (table, sort) pairs hash to the same token %q", one)
 	}
 	// The same shape one field to the left, so the fix cannot be a special
 	// case for the table position.
-	three := sortToken("main", "x", []orderTerm{{expr: "y"}, {expr: "z"}})
-	four := sortToken("main", "x", []orderTerm{{expr: "y\x00a\x00z"}})
+	three := keyset.Token("main", "x", []keyset.Term{{Expr: "y"}, {Expr: "z"}})
+	four := keyset.Token("main", "x", []keyset.Term{{Expr: "y\x00a\x00z"}})
 	if three == four {
 		t.Errorf("two different order lists hash to the same token %q", three)
 	}
@@ -1309,13 +1310,13 @@ func TestSortTokenCannotBeCollidedByMovingASeparator(t *testing.T) {
 // cursors. The bug would be introduced by the copy and invisible in the
 // original, which is the kind that ships.
 func TestSortTokenFoldsInTheDatabaseItWasIssuedFor(t *testing.T) {
-	order := []orderTerm{{expr: `"id"`}}
-	if sortToken("main", "t", order) == sortToken("reporting", "t", order) {
+	order := []keyset.Term{{Expr: `"id"`}}
+	if keyset.Token("main", "t", order) == keyset.Token("reporting", "t", order) {
 		t.Error("the same table name in two databases produced the same token")
 	}
 }
 
-// SQLite resolves an identifier case-insensitively — columnNamed already
+// SQLite resolves an identifier case-insensitively — keyset.ColumnNamed already
 // matches that way — so a cursor issued for `users` must keep working when
 // the caller spells the table `USERS`. It did not: the token hashed the
 // table name verbatim, so the continuation was refused as a cursor from a
