@@ -236,6 +236,61 @@ it('renders nothing for a canceled loadColumns and leaves the table collapsed, n
   expect(columnsMock).toHaveBeenCalledTimes(2);
 });
 
+// Every other fixture in this file has exactly one table, and that
+// uniformity is what hid the blanking bug: `.map` on a database with no
+// tables is fine, `.map` on a null one takes the whole window out, and
+// neither case had a fixture.
+it('renders an explicit empty state for a database with no tables', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    ...openResult,
+    catalog: { databases: [{ name: 'main', tables: [] }] },
+  });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  // Not nothing: a database that renders blank is indistinguishable from one
+  // that failed to load.
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+});
+
+// The exact wire shape: Go's encoding/json writes a nil slice as `null`,
+// which arrives here as null however confidently `Catalog` declares
+// `tables: Table[]`. There is no error boundary in App.tsx, so `.map` on it
+// blanks the whole window.
+it('survives a database whose tables arrive as null on the wire', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    ...openResult,
+    catalog: { databases: [{ name: 'main', tables: null as unknown as [] }] },
+  });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+  // Still a live sidebar, not a blank window.
+  expect(screen.getByText('local')).toBeDefined();
+});
+
+it('survives a catalog whose databases arrive as null on the wire', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    ...openResult,
+    catalog: { databases: null as unknown as [] },
+  });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+  expect(screen.getByText('local')).toBeDefined();
+});
+
 it('shows the engine message inline when listConnections fails', async () => {
   listMock.mockRejectedValue({
     code: -32020, message: 'boom', data: { kind: 'unknown', message: 'config file is corrupt' },

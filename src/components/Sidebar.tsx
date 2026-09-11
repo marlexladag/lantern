@@ -46,6 +46,29 @@ function tableKey(connectionId: string, databaseName: string, tableName: string)
   return `${connectionId}\x00${databaseName}\x00${tableName}`;
 }
 
+/**
+ * Every table in a catalog, flattened, carrying the database it came from.
+ *
+ * The two `?? []` guards are deliberately defensive and are NOT redundant
+ * with the types: `Catalog` declares both of these as arrays, but Go's
+ * encoding/json writes a nil slice as `null`, and that is exactly what the
+ * engine sent for a database with no user tables. There is no error boundary
+ * in App.tsx, so `.map` on one of those took the whole window blank. The
+ * engine has since been fixed to send `[]`, which is why this guard stays:
+ * the contract has now been proven not to enforce itself, and this is the
+ * seam it crosses. Do not delete these because the type says they cannot
+ * happen — that is precisely what was believed last time.
+ */
+function flattenTables(catalog: Catalog): { databaseName: string; table: Table }[] {
+  const out: { databaseName: string; table: Table }[] = [];
+  for (const database of catalog.databases ?? []) {
+    for (const table of database.tables ?? []) {
+      out.push({ databaseName: database.name, table });
+    }
+  }
+  return out;
+}
+
 type Row =
   | { kind: 'connection'; id: string; connection: Connection }
   | {
@@ -130,17 +153,15 @@ export function Sidebar() {
       out.push({ kind: 'connection', id: connection.id, connection });
       const session = sessions[connection.id];
       if (session?.status === 'open' && session.expanded) {
-        for (const database of session.catalog.databases) {
-          for (const table of database.tables) {
-            out.push({
-              kind: 'table',
-              id: tableKey(connection.id, database.name, table.name),
-              sessionId: session.sessionId,
-              connectionId: connection.id,
-              databaseName: database.name,
-              table,
-            });
-          }
+        for (const { databaseName, table } of flattenTables(session.catalog)) {
+          out.push({
+            kind: 'table',
+            id: tableKey(connection.id, databaseName, table.name),
+            sessionId: session.sessionId,
+            connectionId: connection.id,
+            databaseName,
+            table,
+          });
         }
       }
     }
@@ -297,6 +318,7 @@ export function Sidebar() {
           {connections.map((connection) => {
             const session = sessions[connection.id];
             const isOpen = session?.status === 'open' && session.expanded;
+            const catalogTables = session?.status === 'open' ? flattenTables(session.catalog) : [];
             return (
               <div key={connection.id}>
                 <div
@@ -329,9 +351,14 @@ export function Sidebar() {
                 )}
                 {isOpen &&
                   session.status === 'open' &&
-                  session.catalog.databases.map((database) =>
-                    database.tables.map((table) => {
-                      const key = tableKey(connection.id, database.name, table.name);
+                  // An open connection with nothing under it says so. Silence
+                  // here is indistinguishable from a catalog that failed to
+                  // load, which is the same defect in a different disguise.
+                  (catalogTables.length === 0 ? (
+                    <div className="sidebar-status">No tables</div>
+                  ) : (
+                    catalogTables.map(({ databaseName, table }) => {
+                      const key = tableKey(connection.id, databaseName, table.name);
                       const ui = tables[key];
                       const rowId = key;
                       return (
@@ -344,7 +371,7 @@ export function Sidebar() {
                             className="sidebar-row is-table"
                             onClick={() => {
                               setActiveRowId(rowId);
-                              toggleTable(session.sessionId, connection.id, database.name, table);
+                              toggleTable(session.sessionId, connection.id, databaseName, table);
                             }}
                           >
                             <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>&#9656;</span>
@@ -366,8 +393,8 @@ export function Sidebar() {
                             ))}
                         </div>
                       );
-                    }),
-                  )}
+                    })
+                  ))}
               </div>
             );
           })}
