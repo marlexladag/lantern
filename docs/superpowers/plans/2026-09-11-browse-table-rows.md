@@ -25,6 +25,31 @@
 - No `Co-Authored-By` trailer on commits.
 - Every task ends with a commit.
 
+### Added after Plan 2's whole-branch review (binding on every task below)
+
+These come from defects that 100% coverage on both sides did not catch,
+because coverage measures which lines run, not which values reach them.
+
+- **Every task adds at least one adversarial fixture** — an input the
+  existing suite never produces. Two shipped bugs came from fixtures that
+  were uniformly well-shaped: a table list that always had a table in it,
+  and an error that arrived as a string when the real code can only throw an
+  object. For this plan the obvious ones are: a table with **zero rows**, a
+  page whose keyset continuation returns **nothing**, a column whose value is
+  **NULL**, and a rejection that is an object rather than a string.
+- **Never render a caught error with `String(err)` or
+  `dbErr?.message ?? String(err)`.** `request()` throws only objects, so that
+  fallback is provably `[object Object]` every time. Use `describeError(err)`
+  from `src/lib/errors.ts` and render it through `<ErrorText>` — both exist
+  as of the post-review fix wave. Task 5's step 1 mentions `asDbError`; it
+  means `describeError` now.
+- **An empty result renders an explicit empty state, never nothing.** A table
+  that draws blank is indistinguishable from one that failed to load. This
+  applies to the grid the same way it now applies to the sidebar.
+- **The error taxonomy has eleven Kinds**, including `read_only`. Any Kind
+  the grid branches on must be handled by name, and the Go/TS set-equality
+  test must stay green.
+
 ---
 
 ## File Structure
