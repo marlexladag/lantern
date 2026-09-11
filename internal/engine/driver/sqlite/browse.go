@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 	"strings"
 
@@ -95,6 +97,17 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: the cursor does not match the sort")
 		}
+		// A width match is not enough: two single-column sorts are the same
+		// width, so a cursor taken under one silently pages under the other
+		// unless something also names WHICH sort it came from. SortToken is
+		// that name, checked only when the caller actually sent one —
+		// verification is an added safety a driver offers, not a new
+		// requirement every caller must satisfy, so a request that omits it
+		// is treated exactly as it was before this check existed.
+		if req.SortToken != "" && req.SortToken != sortToken(req.Table, order) {
+			return nil, dberr.New(dberr.KindInvalid,
+				"browse: this cursor was issued for a different sort; start again from the first page")
+		}
 		pred, pargs, err := keysetPredicate(order, req.After)
 		if err != nil {
 			return nil, err
@@ -169,6 +182,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 			keyset[i] = driver.Normalize(last[len(cols)+i])
 		}
 		page.Keyset = keyset
+		page.SortToken = sortToken(req.Table, order)
 	}
 	return page, nil
 }
@@ -182,6 +196,54 @@ const blobClass = "blob"
 type orderTerm struct {
 	expr string
 	desc bool
+}
+
+// sortToken fingerprints the ordering a page was actually produced under, so
+// a caller's cursor can be checked against the sort that is CURRENTLY being
+// requested and not just trusted to still apply.
+//
+// It is built from order — the RESOLVED ordering planOrder returns, complete
+// with whatever tiebreaker it appended — rather than from req.Sort. req.Sort
+// is empty on the ordinary default-sort path (see planOrder's doc comment),
+// so hashing it directly would produce the same token for every table's
+// default sort; the resolved ordering is the thing that actually determines
+// what "after" means for a given cursor, and it is what has to match.
+//
+// table is folded in for the same reason: two tables can share a column
+// name and produce identical order terms, and a token that could not tell
+// them apart would let a cursor from one page the other.
+//
+// crypto/sha256 is used here only for its collision resistance across the
+// handful of orderings one table can produce — this is a consistency check
+// against an accidental mismatch (the caller's own stale cursor), not a
+// security boundary, so the digest is truncated: nothing is lost by a
+// shorter token that a legitimate caller could still not have predicted, and
+// nothing would be gained by a longer one that only an adversary deliberately
+// searching for a collision would care about. A 0 byte separates every
+// field fed into the hash, so table "ab" with no sort columns cannot be
+// confused with table "a" sorted by a column named "b" — the two would
+// otherwise concatenate to the same bytes. The separator itself cannot
+// appear inside a field: table is caller text but only ever hashed, never
+// executed, and every order[i].expr is either c.Quote(column) or one of the
+// three fixed rowid spellings, none of which SQLite identifiers can spell
+// with an embedded NUL.
+func sortToken(table string, order []orderTerm) string {
+	var b strings.Builder
+	b.WriteString(databaseName)
+	b.WriteByte(0)
+	b.WriteString(table)
+	for _, t := range order {
+		b.WriteByte(0)
+		b.WriteString(t.expr)
+		b.WriteByte(0)
+		if t.desc {
+			b.WriteByte('d')
+		} else {
+			b.WriteByte('a')
+		}
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // planOrder resolves the request's sort into a total ordering where it can,

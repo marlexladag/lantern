@@ -755,6 +755,186 @@ func TestBrowseRejectsACursorOfTheWrongWidth(t *testing.T) {
 	}
 }
 
+// -- a cursor must name the sort it came from ----------------------------
+//
+// A Keyset says only "the row after this one" — it carries no description
+// of the ordering that made "after" meaningful. TestBrowseRejectsACursorOfTheWrongWidth
+// catches a cursor whose WIDTH no longer matches the current sort, but two
+// single-column sorts are the same width, so that check is blind to exactly
+// the case that corrupts a grid silently: sort by one column, page a while,
+// switch to a different column of the same sort width, and a keyset alone
+// cannot tell the new request its After no longer names a boundary that
+// sort produces. BrowsePage.SortToken and BrowseRequest.SortToken close
+// that gap.
+
+// This is the test the whole task exists for. A cursor taken from a sort by
+// email is replayed against a sort by score — same table, same width (both
+// resolve to [sort column, rowid]), different column — and must be refused
+// rather than silently served from a boundary the new sort never produced.
+func TestBrowseRejectsACursorFromADifferentSort(t *testing.T) {
+	b := browser(t, browseFixture(t, 10))
+	byEmail, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 3,
+		Sort: []driver.SortKey{{Column: "email"}},
+	})
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(byEmail.Keyset) == 0 || byEmail.SortToken == "" {
+		t.Fatal("no keyset/token issued on a keyset-pagable sort")
+	}
+
+	_, err = b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 3,
+		Sort:      []driver.SortKey{{Column: "score"}},
+		After:     byEmail.Keyset,
+		SortToken: byEmail.SortToken,
+	})
+	if err == nil {
+		t.Fatal("a cursor taken from a sort by email was accepted by a sort by score")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+}
+
+// The other half of the same check: a legitimate continuation, where the
+// sort has not changed, must still work. A verification that rejects its
+// own driver's cursors is worse than the bug it was built to catch.
+func TestBrowseAcceptsTheSameCursorUnderTheSameSort(t *testing.T) {
+	b := browser(t, browseFixture(t, 7))
+	req := driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 3,
+		Sort: []driver.SortKey{{Column: "email"}},
+	}
+	page1, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	req.After, req.SortToken = page1.Keyset, page1.SortToken
+
+	page2, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("a legitimate continuation under the same sort was rejected: %v", err)
+	}
+	if len(page2.Rows) == 0 {
+		t.Error("a legitimate continuation returned no rows")
+	}
+}
+
+// The ordinary default-sort path — Sort empty on both requests — must round
+// trip too. The token has to be derived from the RESOLVED order (primary
+// key plus rowid tiebreaker), not from req.Sort, which is empty here on
+// every page and would otherwise collide across every table.
+func TestBrowseDefaultSortRoundTripsWithSortToken(t *testing.T) {
+	const total = 9
+	b := browser(t, browseFixture(t, total))
+
+	seen := map[string]int{}
+	req := driver.BrowseRequest{Database: "main", Table: "users", Limit: 4}
+	for pages := 0; ; pages++ {
+		if pages > total {
+			t.Fatal("pagination did not terminate")
+		}
+		page, err := b.Browse(context.Background(), req)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		for _, row := range page.Rows {
+			seen[row[0].Text]++
+		}
+		if page.Exhausted {
+			break
+		}
+		req.After, req.SortToken = page.Keyset, page.SortToken
+	}
+	if len(seen) != total {
+		t.Fatalf("saw %d distinct ids, want %d", len(seen), total)
+	}
+}
+
+// Ascending and descending on the same column are the same columns, the
+// same width, and opposite order — paging one with the other's cursor is
+// exactly as wrong as paging with a different column's cursor, so the token
+// must differ between them too.
+func TestBrowseSortTokenDiffersByDirection(t *testing.T) {
+	b := browser(t, browseFixture(t, 5))
+	ascReq := driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		Sort: []driver.SortKey{{Column: "email"}},
+	}
+	asc, err := b.Browse(context.Background(), ascReq)
+	if err != nil {
+		t.Fatalf("ascending: %v", err)
+	}
+	descReq := driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		Sort: []driver.SortKey{{Column: "email", Desc: true}},
+	}
+	desc, err := b.Browse(context.Background(), descReq)
+	if err != nil {
+		t.Fatalf("descending: %v", err)
+	}
+	if asc.SortToken == "" || desc.SortToken == "" {
+		t.Fatal("no sort token issued")
+	}
+	if asc.SortToken == desc.SortToken {
+		t.Fatal("ascending and descending sorts on the same column produced the same token")
+	}
+
+	descReq.After, descReq.SortToken = asc.Keyset, asc.SortToken
+	if _, err := b.Browse(context.Background(), descReq); err == nil {
+		t.Fatal("an ascending cursor was accepted by a descending sort of the same column")
+	} else if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+}
+
+// Two tables sorted the same way — same column name, same direction — must
+// still produce different tokens: a token that named only the sort's shape,
+// and not the table it applies to, would let a cursor from one table page
+// another that happens to share a column name.
+func TestBrowseSortTokenDiffersByTable(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT)`,
+		`INSERT INTO t1 VALUES (1,'a'),(2,'b'),(3,'c')`,
+		`CREATE TABLE t2 (id INTEGER PRIMARY KEY, name TEXT)`,
+		`INSERT INTO t2 VALUES (1,'a'),(2,'b'),(3,'c')`,
+	)
+	p1, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "t1", Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("t1: %v", err)
+	}
+	p2, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "t2", Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("t2: %v", err)
+	}
+	if p1.SortToken == "" || p2.SortToken == "" {
+		t.Fatal("no sort token issued")
+	}
+	if p1.SortToken == p2.SortToken {
+		t.Error("the same sort on two different tables produced the same token")
+	}
+}
+
+// A stale token with no After to go with it is not a caller mistake: the
+// caller may simply be starting over. Only After present with a SortToken
+// that then fails to match is refused.
+func TestBrowseIgnoresASortTokenWithNoAfter(t *testing.T) {
+	b := browser(t, browseFixture(t, 3))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		SortToken: "stale-token-from-a-previous-session",
+	})
+	if err != nil {
+		t.Fatalf("a first page carrying a stale sort token was rejected: %v", err)
+	}
+}
+
 func TestBrowseRejectsACursorWithUnparseableValues(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
