@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import './styles/tokens.css';
+import './styles/chrome.css';
 import './App.css';
 import { EngineStatus } from './components/EngineStatus';
 import { Sidebar, ADD_CONNECTION_EVENT, CONNECTIONS_CHANGED_EVENT } from './components/Sidebar';

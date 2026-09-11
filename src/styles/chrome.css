@@ -1,0 +1,50 @@
+/**
+ * Application chrome is not selectable text.
+ *
+ * Spec §12, "Native platform conventions, not web defaults": labels, section
+ * headings and driver names must carry `user-select: none`; only data cells
+ * and query text are selectable. "A drag across a sidebar label highlighting
+ * it like prose is the single clearest tell that a desktop app is a web
+ * page" — and that is exactly what was reported against this build, on a
+ * connection name.
+ *
+ * The policy lives here, in one file, instead of being sprinkled through the
+ * component stylesheets: the default for everything Lantern draws is "not
+ * selectable", and the short list of things a person legitimately copies
+ * opts back in below. A new component inherits the policy by existing.
+ *
+ * Written against `*` rather than `body` deliberately. `user-select` is an
+ * inherited property, but an inherited value loses to any rule that matches
+ * a descendant directly, so a single `body` declaration is only as reliable
+ * as the rules nobody has written yet; declaring it per element makes the
+ * policy the thing that has to be overridden on purpose. It is also what
+ * lets the rule be asserted directly on a rendered element in a test.
+ *
+ * The -webkit- prefix is not legacy padding: Lantern ships on WKWebView on
+ * macOS, which still requires it.
+ */
+* {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/*
+ * The exceptions, and the whole list of them.
+ *
+ * Error text is what people copy into a search box or a bug report — both
+ * the engine's message and the driver's own words behind ErrorText's Details
+ * disclosure, which exists to be read and quoted (the <summary> control that
+ * opens it is chrome, and stays unselectable). Form fields need it to let a
+ * user select what they typed. `[data-selectable]` is the hook for the
+ * result grid's data cells and the query editor, neither of which exists
+ * yet: when they land they must not have to relitigate this policy.
+ */
+.error-text-message,
+.error-text-native-body,
+input,
+textarea,
+[data-selectable],
+[data-selectable] * {
+  -webkit-user-select: text;
+  user-select: text;
+}
