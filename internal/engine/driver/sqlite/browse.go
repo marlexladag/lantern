@@ -100,11 +100,24 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 		// A width match is not enough: two single-column sorts are the same
 		// width, so a cursor taken under one silently pages under the other
 		// unless something also names WHICH sort it came from. SortToken is
-		// that name, checked only when the caller actually sent one —
-		// verification is an added safety a driver offers, not a new
-		// requirement every caller must satisfy, so a request that omits it
-		// is treated exactly as it was before this check existed.
-		if req.SortToken != "" && req.SortToken != sortToken(req.Table, order) {
+		// that name, and it is REQUIRED rather than optional whenever After
+		// is present.
+		//
+		// Optional verification would not be verification. A caller that
+		// forgot the token would get exactly the silent corruption this check
+		// exists to prevent — rows skipped or repeated in the grid with
+		// nothing to indicate it — and "the caller should remember" is the
+		// shape of two defects this project has already shipped. There is no
+		// legitimate request with After and no token, either: every After
+		// value came from a page, and every page issues a token alongside it.
+		// So the only thing an omitted token can mean is a caller that built
+		// the cursor itself or dropped a field, and both should hear about it
+		// loudly, at the first request, rather than read a wrong page.
+		if req.SortToken == "" {
+			return nil, dberr.New(dberr.KindInvalid,
+				"browse: this cursor is missing the sort it was issued for; start again from the first page")
+		}
+		if req.SortToken != sortToken(req.Table, order) {
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: this cursor was issued for a different sort; start again from the first page")
 		}

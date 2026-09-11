@@ -120,6 +120,10 @@ func TestBrowsePagesThroughEveryRowExactlyOnce(t *testing.T) {
 			break
 		}
 		req.After = page.Keyset
+		// Carry the token forward exactly as a real caller must: a cursor is
+		// the keyset AND the sort it was issued for, and Browse refuses the
+		// pair split up.
+		req.SortToken = page.SortToken
 	}
 
 	if len(seen) != total {
@@ -185,6 +189,10 @@ func TestBrowseOnANonUniqueSortStillPagesWithoutGaps(t *testing.T) {
 			break
 		}
 		req.After = page.Keyset
+		// Carry the token forward exactly as a real caller must: a cursor is
+		// the keyset AND the sort it was issued for, and Browse refuses the
+		// pair split up.
+		req.SortToken = page.SortToken
 		req.Offset = page.Offset
 	}
 	if len(seen) != total {
@@ -317,7 +325,9 @@ func pageAll(t *testing.T, b driver.Browser, req driver.BrowseRequest) [][]drive
 		if page.Exhausted {
 			return all
 		}
-		req.After, req.Offset = page.Keyset, page.Offset
+		// A cursor is the keyset AND the sort it was issued for; Browse
+		// refuses the pair split up, exactly as a real caller must not.
+		req.After, req.Offset, req.SortToken = page.Keyset, page.Offset, page.SortToken
 	}
 }
 
@@ -395,11 +405,12 @@ func TestBrowseContinuationPastTheLastRowReturnsNothing(t *testing.T) {
 		if page.Exhausted {
 			t.Fatalf("page %d of 4 rows out of 8 reported Exhausted", i)
 		}
-		req.After, last = page.Keyset, page
+		req.After, req.SortToken, last = page.Keyset, page.SortToken, page
 	}
 
 	page, err := b.Browse(context.Background(), driver.BrowseRequest{
 		Database: "main", Table: "users", Limit: 4, After: last.Keyset,
+		SortToken: last.SortToken,
 	})
 	if err != nil {
 		t.Fatalf("continuation: %v", err)
@@ -968,9 +979,24 @@ func TestBrowseRejectsACursorWithUnparseableValues(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := browser(t, browseFixture(t, 5))
-			_, err := b.Browse(context.Background(), driver.BrowseRequest{
+			// Take a REAL token from a real first page under this same sort,
+			// so the request that follows is rejected for its malformed
+			// values and not merely for arriving without a token. Both
+			// failures are KindInvalid, so a hand-written token — or none —
+			// would let three of these four cases pass while proving nothing
+			// about the cursor parsing they are named for.
+			first, err := b.Browse(context.Background(), driver.BrowseRequest{
+				Database: "main", Table: "users", Limit: 2, Sort: tc.sort,
+			})
+			if err != nil {
+				t.Fatalf("first page: %v", err)
+			}
+			if first.SortToken == "" {
+				t.Fatal("first page issued no sort token; this test would prove nothing")
+			}
+			_, err = b.Browse(context.Background(), driver.BrowseRequest{
 				Database: "main", Table: "users", Limit: 2,
-				Sort: tc.sort, After: tc.after,
+				Sort: tc.sort, After: tc.after, SortToken: first.SortToken,
 			})
 			if err == nil {
 				t.Fatal("a malformed cursor was accepted")
@@ -1095,5 +1121,37 @@ func TestBrowseRejectsANegativeOffset(t *testing.T) {
 	}
 	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
 		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+}
+
+// A cursor is the keyset AND the sort it was issued for. Splitting the pair —
+// sending After with no token — used to be accepted and paged from wherever
+// the values happened to land, which is the silent-corruption path this whole
+// mechanism exists to close. There is no legitimate request of this shape:
+// every After value came from a page, and every page issues a token with it.
+func TestBrowseRefusesAKeysetWithNoSortToken(t *testing.T) {
+	b := browser(t, browseFixture(t, 5))
+	first, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	_, err = b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2, After: first.Keyset,
+	})
+	if err == nil {
+		t.Fatal("a keyset with no sort token was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want invalid", got.Kind)
+	}
+	// The same keyset WITH its token still works — a check that refused
+	// legitimate continuations would be worse than the bug it closes.
+	if _, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		After: first.Keyset, SortToken: first.SortToken,
+	}); err != nil {
+		t.Errorf("the cursor was refused with its own token: %v", err)
 	}
 }
