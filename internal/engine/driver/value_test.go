@@ -3,6 +3,7 @@ package driver
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,10 +70,53 @@ func TestNormalizeBoolAndTime(t *testing.T) {
 	if got.Kind != ValueTime {
 		t.Fatalf("time kind = %q", got.Kind)
 	}
-	// RFC3339 so the UI can parse it, and so sorting a text column of
-	// timestamps still orders correctly.
+	// RFC3339Nano omits the fractional field entirely when there is none, so
+	// a whole second still renders clean.
 	if got.Text != "2026-09-11T14:30:05Z" {
 		t.Errorf("time text = %q", got.Text)
+	}
+}
+
+// Adversarial: a TIMESTAMP(6) column. Under RFC3339 — which has no
+// fractional-seconds field at all — these microseconds vanished silently,
+// which is precisely the precision loss Value exists to prevent. Nothing in
+// the suite produced a sub-second time before this, so nothing could fail.
+func TestNormalizeKeepsSubSecondPrecision(t *testing.T) {
+	ts := time.Date(2026, 9, 11, 14, 30, 5, 123456000, time.UTC)
+	if got := Normalize(ts); got.Text != "2026-09-11T14:30:05.123456Z" {
+		t.Errorf("microseconds lost: %q", got.Text)
+	}
+	// Nanosecond precision survives too — Postgres tops out at microseconds,
+	// but a driver is free to hand back more and we should not truncate it.
+	ns := time.Date(2026, 9, 11, 14, 30, 5, 123456789, time.UTC)
+	if got := Normalize(ns); got.Text != "2026-09-11T14:30:05.123456789Z" {
+		t.Errorf("nanoseconds lost: %q", got.Text)
+	}
+}
+
+// Adversarial, and a deliberate tripwire rather than a plain assertion.
+//
+// Normalize converts to UTC, which is only correct while every driver returns
+// a time whose wall-clock reading equals what the column stores, labelled
+// UTC. A SQL DATETIME carries no zone, so that label is the driver's choice:
+// MySQL returns whatever `loc` its DSN was given. This test pins the
+// consequence of getting that wrong — a wall clock shifted off the stored
+// value, with nothing in the UI to hint at it — so a future driver that
+// forgets to pin its connection to UTC has a failing test to read rather than
+// a comment to ignore.
+func TestNormalizeShiftsAZonedTimeToUTC(t *testing.T) {
+	manila := time.FixedZone("PHT", 8*60*60)
+	// The wall clock a user would see in a DATETIME column: 14:30:05.
+	ts := time.Date(2026, 9, 11, 14, 30, 5, 0, manila)
+	got := Normalize(ts)
+	if got.Text != "2026-09-11T06:30:05Z" {
+		t.Errorf("zoned time -> %q, want the UTC instant", got.Text)
+	}
+	// Stated plainly so the cost is impossible to miss when this test is
+	// read: the column says 14:30:05 and the grid would show 06:30:05.
+	if strings.Contains(got.Text, "14:30:05") {
+		t.Error("unreachable today; here to fail loudly if .UTC() is removed " +
+			"without also settling what the grid should display")
 	}
 }
 

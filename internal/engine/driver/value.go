@@ -74,9 +74,24 @@ func Normalize(v any) Value {
 	case float32:
 		return Value{Kind: ValueFloat, Text: strconv.FormatFloat(float64(t), 'f', -1, 32)}
 	case time.Time:
-		// RFC3339 so the UI can parse it and so a plain text sort of the
-		// column still orders correctly.
-		return Value{Kind: ValueTime, Text: t.UTC().Format(time.RFC3339)}
+		// RFC3339Nano, not RFC3339: RFC3339 has no fractional-seconds field,
+		// so a TIMESTAMP(6) column would silently lose its microseconds —
+		// the exact class of precision loss this whole type exists to
+		// prevent, and it would be invisible until someone compared the grid
+		// against the database. Nano omits the fraction entirely when there
+		// is none, so whole seconds still render clean.
+		//
+		// .UTC() DEPENDS ON A DRIVER INVARIANT: every driver must return a
+		// time whose wall-clock reading equals what is stored in the column,
+		// labelled UTC. SQL DATETIME columns carry no zone, so the label is
+		// the driver's choice — MySQL, for one, returns whatever `loc` its
+		// DSN was given. A driver that hands back a local-zoned time will
+		// have every timestamp in the grid shifted off what the column
+		// actually says, with nothing to hint at it. Any networked driver
+		// added here must pin its connection to UTC. The zoned-time test in
+		// value_test.go exists to make that requirement visible and failing
+		// rather than leave it as a comment nobody reads.
+		return Value{Kind: ValueTime, Text: t.UTC().Format(time.RFC3339Nano)}
 	}
 
 	// An unrecognised type is still worth showing rather than dropping.
