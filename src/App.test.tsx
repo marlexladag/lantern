@@ -9,12 +9,49 @@ vi.mock('./components/EngineStatus', () => ({
 
 // Sidebar has its own suite (including its own list-loading effects, which
 // would otherwise drag ../lib/connections into this one). It is stubbed here
-// down to the two things App actually depends on: that it mounts, and the
-// two module-level event names App coordinates through.
+// down to what App actually depends on: that it mounts, the two module-level
+// event names App coordinates through, and the selection seam — two buttons
+// standing in for two table rows, plus a readback of the selection App hands
+// straight back down.
+//
+// The real Sidebar driven by real clicks against the real grid is the
+// subject of App.wiring.test.tsx; this file stays a test of the composition
+// root.
 vi.mock('./components/Sidebar', () => ({
-  Sidebar: () => <div data-testid="sidebar" />,
+  Sidebar: ({
+    onSelectTable,
+    selectedTable,
+  }: {
+    onSelectTable: (sessionId: string, database: string, table: string) => void;
+    selectedTable: { sessionId: string; database: string; table: string } | null;
+  }) => (
+    <div
+      data-testid="sidebar"
+      data-selected={selectedTable ? `${selectedTable.sessionId}/${selectedTable.database}/${selectedTable.table}` : ''}
+    >
+      <button onClick={() => onSelectTable('s1', 'main', 'users')}>select-users</button>
+      <button onClick={() => onSelectTable('s2', 'shop', 'orders')}>select-orders</button>
+    </div>
+  ),
   ADD_CONNECTION_EVENT: 'lantern:add-connection',
   CONNECTIONS_CHANGED_EVENT: 'lantern:connections-changed',
+}));
+
+// The grid draws to a canvas jsdom cannot provide, and has its own suite for
+// what it does with a page. Stubbed down to the three props App is
+// responsible for choosing.
+vi.mock('./components/ResultGrid', () => ({
+  ResultGrid: ({
+    sessionId,
+    database,
+    table,
+  }: {
+    sessionId: string;
+    database: string;
+    table: string;
+  }) => (
+    <div data-testid="result-grid" data-session={sessionId} data-database={database} data-table={table} />
+  ),
 }));
 
 // ConnectionDialog has its own suite too. Stubbed down to the props App
@@ -94,4 +131,70 @@ it('stops listening for ADD_CONNECTION_EVENT after unmounting', () => {
   // If the listener were still attached, this would throw trying to call
   // setState on an unmounted component instead of doing nothing quietly.
   expect(() => fireEvent(window, new CustomEvent(ADD_CONNECTION_EVENT))).not.toThrow();
+});
+
+const PLACEHOLDER = 'Select a table to see its data.';
+
+it('shows the placeholder until a table is selected', () => {
+  render(<App />);
+  expect(screen.getByText(PLACEHOLDER)).toBeDefined();
+  expect(screen.queryByTestId('result-grid')).toBeNull();
+  expect(screen.getByTestId('sidebar').dataset.selected).toBe('');
+});
+
+it('replaces the placeholder with the grid for the table the sidebar selected', () => {
+  render(<App />);
+  fireEvent.click(screen.getByText('select-users'));
+
+  const grid = screen.getByTestId('result-grid');
+  expect(grid.dataset.session).toBe('s1');
+  expect(grid.dataset.database).toBe('main');
+  expect(grid.dataset.table).toBe('users');
+  expect(screen.queryByText(PLACEHOLDER)).toBeNull();
+});
+
+// Replaced, not accumulated: one main pane, one table.
+it('replaces the grid when a second table is selected', () => {
+  render(<App />);
+  fireEvent.click(screen.getByText('select-users'));
+  fireEvent.click(screen.getByText('select-orders'));
+
+  const grids = screen.getAllByTestId('result-grid');
+  expect(grids.length).toBe(1);
+  expect(grids[0].dataset.session).toBe('s2');
+  expect(grids[0].dataset.database).toBe('shop');
+  expect(grids[0].dataset.table).toBe('orders');
+});
+
+// The sidebar draws its highlight from this rather than from a copy of its
+// own, so the marked row and the grid can never name different tables.
+it('hands the selection back to the sidebar', () => {
+  render(<App />);
+  fireEvent.click(screen.getByText('select-orders'));
+
+  expect(screen.getByTestId('sidebar').dataset.selected).toBe('s2/shop/orders');
+});
+
+/*
+ * A regression pin, and it is worth saying exactly what it does and does not
+ * prove. `.app-main` used to centre its content on both axes; a flex item
+ * under that is sized to its own content, so the grid — which asks for the
+ * height of its container and fills it — collapsed to nothing. It rendered,
+ * occupied zero pixels, and looked like the click had done nothing at all.
+ *
+ * jsdom performs no layout, so this asserts the cascaded VALUE, not the
+ * resulting height: it catches the centring coming back, and nothing more.
+ * The height itself was measured in a real browser against the built bundle
+ * (see the task report).
+ */
+it('lets the main pane stretch its content instead of centring it to content size', () => {
+  render(<App />);
+  const main = document.querySelector('.app-main') as HTMLElement;
+  expect(getComputedStyle(main).alignItems).toBe('stretch');
+
+  // The centring did hold something up: the placeholder was centred by it.
+  // It has to keep being centred by something of its own.
+  const empty = screen.getByText(PLACEHOLDER);
+  expect(getComputedStyle(empty).alignItems).toBe('center');
+  expect(getComputedStyle(empty).justifyContent).toBe('center');
 });

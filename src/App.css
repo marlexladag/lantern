@@ -44,13 +44,31 @@
   min-height: 0;
 }
 
+/*
+ * `stretch` on both axes, and that is load-bearing rather than tidy-up.
+ *
+ * This used to centre on both. A flex item under `align-items: center` is
+ * sized to its own CONTENT, and the result grid sizes itself to its
+ * container — so the grid resolved to zero height, rendered, occupied
+ * nothing, and looked exactly like clicking a table had done nothing at all.
+ * The centring was there for the placeholder below, which now centres
+ * itself.
+ */
 .app-main {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
   min-width: 0;
   background: var(--color-surface);
   color: var(--color-faint);
   font-size: var(--text-body);
+}
+
+/* The centring that was on .app-main, moved onto the only thing it was for. */
+.app-main-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }

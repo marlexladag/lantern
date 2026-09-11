@@ -80,6 +80,44 @@ type Row =
       table: Table;
     };
 
+/**
+ * Which table's rows the main pane is showing.
+ *
+ * The session id is part of the identity, not decoration: two connections
+ * can both hold a `main` database with a `users` table in it, and only the
+ * session tells those two apart.
+ */
+export interface TableSelection {
+  sessionId: string;
+  database: string;
+  table: string;
+}
+
+export interface SidebarProps {
+  /**
+   * Raised when the user activates a table — by click or by Enter, which
+   * are the same activation here. Expanding a table and asking to see its
+   * rows are one gesture (Main.dc.html marks the expanded table as the one
+   * filling the pane), so this fires alongside the expand rather than from
+   * a second affordance.
+   *
+   * Optional, so `<Sidebar />` stays mountable on its own the way the
+   * event-based add-connection affordance already keeps it.
+   */
+  onSelectTable?: (sessionId: string, database: string, table: string) => void;
+  /**
+   * The selection to mark, handed back down by whoever holds it.
+   *
+   * Deliberately NOT a second copy kept inside this component. The selection
+   * drives the main pane, so the pane's owner is the one thing that knows
+   * what is actually on screen; a sidebar highlighting from its own copy is
+   * how a highlight comes to point at a different table than the grid is
+   * showing. This is also distinct from `activeRowId` below, which is the
+   * roving tabIndex owner — arrow keys move that without selecting anything.
+   */
+  selectedTable?: TableSelection | null;
+}
+
 function LockIcon() {
   return (
     <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
@@ -89,7 +127,7 @@ function LockIcon() {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [listError, setListError] = useState<ErrorDescription | null>(null);
@@ -225,7 +263,14 @@ export function Sidebar() {
   // the keyboard) only exists in the first place because that table's
   // session is already open — there is no code path that reaches this
   // function without one, so there is nothing to defend against here.
-  function toggleTable(sessionId: string, connectionId: string, databaseName: string, table: Table) {
+  function activateTable(sessionId: string, connectionId: string, databaseName: string, table: Table) {
+    // Raised FIRST, ahead of every early return below, because activating a
+    // table always means "show me this one" even when it means nothing else:
+    // the second click on an expanded table collapses its column list, and
+    // if that click stopped selecting it would take the table's rows out of
+    // the main pane at the same time — one gesture hiding two different
+    // things. A click while the columns are still loading is the same story.
+    onSelectTable?.(sessionId, databaseName, table.name);
     const key = tableKey(connectionId, databaseName, table.name);
     const existing = tables[key];
     // Already loaded: flip visibility only, never refetch.
@@ -254,7 +299,7 @@ export function Sidebar() {
 
   function activateRow(row: Row) {
     if (row.kind === 'connection') toggleConnection(row.connection);
-    else toggleTable(row.sessionId, row.connectionId, row.databaseName, row.table);
+    else activateTable(row.sessionId, row.connectionId, row.databaseName, row.table);
   }
 
   function handleTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
@@ -361,17 +406,26 @@ export function Sidebar() {
                       const key = tableKey(connection.id, databaseName, table.name);
                       const ui = tables[key];
                       const rowId = key;
+                      const isSelected =
+                        selectedTable?.sessionId === session.sessionId &&
+                        selectedTable.database === databaseName &&
+                        selectedTable.table === table.name;
                       return (
                         <div key={rowId}>
                           <div
                             role="treeitem"
                             aria-expanded={ui?.expanded ?? false}
+                            // Only table rows carry this: a connection row is
+                            // not something the main pane can show, so
+                            // claiming it is unselected would be a state it
+                            // does not have.
+                            aria-selected={isSelected}
                             tabIndex={activeRowId === rowId ? 0 : -1}
                             ref={(el) => setRowRef(rowId, el)}
-                            className="sidebar-row is-table"
+                            className={`sidebar-row is-table${isSelected ? ' is-selected' : ''}`}
                             onClick={() => {
                               setActiveRowId(rowId);
-                              toggleTable(session.sessionId, connection.id, databaseName, table);
+                              activateTable(session.sessionId, connection.id, databaseName, table);
                             }}
                           >
                             <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>&#9656;</span>

@@ -599,3 +599,173 @@ it('clears the active row when the connection list empties out after a refetch',
 
   await waitFor(() => expect(screen.getByText(/no connections/i)).toBeDefined());
 });
+
+// ---------------------------------------------------------------------------
+// Selecting a table (Task 7)
+//
+// Expanding and selecting are the same activation — Main.dc.html marks the
+// expanded table as the one whose rows fill the pane — so these assert
+// against the same clicks and keystrokes the tests above already use, not a
+// second affordance.
+// ---------------------------------------------------------------------------
+
+const twoTables = {
+  ...openResult,
+  catalog: {
+    databases: [
+      {
+        name: 'main',
+        tables: [
+          { name: 'users', kind: 'table' as const },
+          { name: 'orders', kind: 'table' as const },
+        ],
+      },
+    ],
+  },
+};
+
+it('raises the selected table when a table row is clicked, as well as expanding it', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  columnsMock.mockResolvedValue(oneColumn);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  expect(onSelectTable).not.toHaveBeenCalled();
+
+  await act(async () => { screen.getByText('users').click(); });
+
+  // The session id, not the connection id: browse.page is addressed to the
+  // open session, and only the sidebar knows which one a table belongs to.
+  expect(onSelectTable).toHaveBeenCalledWith('s1', 'main', 'users');
+  // Still expanded, too — one click does both.
+  await waitFor(() => expect(screen.getByText('id')).toBeDefined());
+});
+
+// The second click on a table collapses its column list. If that click
+// stopped selecting, it would also take the table's rows out of the main
+// pane — a click that hides two different things at once.
+it('raises the selection again when an already-expanded table is clicked', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  columnsMock.mockResolvedValue(oneColumn);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  await act(async () => { screen.getByText('users').click(); });
+  await waitFor(() => expect(screen.getByText('id')).toBeDefined());
+  await act(async () => { screen.getByText('users').click(); }); // collapse
+
+  expect(screen.queryByText('id')).toBeNull();
+  expect(onSelectTable).toHaveBeenCalledTimes(2);
+  expect(onSelectTable).toHaveBeenNthCalledWith(2, 's1', 'main', 'users');
+});
+
+// A table whose columns are still loading is still the table the user asked
+// to see. The in-flight guard must not swallow the selection with the fetch.
+it('raises the selection even while the columns fetch is still in flight', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  columnsMock.mockReturnValue(new Promise(() => {}));
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  await act(async () => { screen.getByText('users').click(); });
+  await act(async () => { screen.getByText('users').click(); });
+
+  expect(columnsMock).toHaveBeenCalledTimes(1);
+  expect(onSelectTable).toHaveBeenCalledTimes(2);
+});
+
+// Spec section 12 is keyboard-first: the sidebar is a tree with a roving
+// tabIndex precisely so it can be driven without a mouse. A selection that
+// only a click can raise would leave the main pane unreachable from the
+// keyboard.
+it('raises the selection from the keyboard, not only from the mouse', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  columnsMock.mockResolvedValue(oneColumn);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+
+  const tree = screen.getByRole('tree');
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // open the connection
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); }); // onto the table row
+  expect(onSelectTable).not.toHaveBeenCalled(); // moving is not selecting
+
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+
+  expect(onSelectTable).toHaveBeenCalledWith('s1', 'main', 'users');
+});
+
+it('raises no selection when a connection row is activated', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  expect(onSelectTable).not.toHaveBeenCalled();
+});
+
+// The highlight is drawn from the selection App holds, not from a copy the
+// sidebar keeps: two sources of truth for "which table is on screen" is how
+// a highlight comes to point at a different table than the grid shows.
+it('marks the selected table row, and only that one', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(twoTables);
+
+  const { rerender } = render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+
+  const rowOf = (name: string) =>
+    screen.getByText(name).closest('[role="treeitem"]') as HTMLElement;
+
+  // Nothing selected yet: no row claims to be.
+  expect(rowOf('users').getAttribute('aria-selected')).toBe('false');
+  expect(rowOf('orders').getAttribute('aria-selected')).toBe('false');
+
+  rerender(<Sidebar selectedTable={{ sessionId: 's1', database: 'main', table: 'orders' }} />);
+
+  expect(rowOf('orders').getAttribute('aria-selected')).toBe('true');
+  expect(rowOf('orders').className).toContain('is-selected');
+  expect(rowOf('users').getAttribute('aria-selected')).toBe('false');
+  expect(rowOf('users').className).not.toContain('is-selected');
+});
+
+// A selection naming a session this sidebar is not showing marks nothing —
+// the session id is part of the identity, not decoration on top of the
+// table name.
+it('marks nothing when the selection names a different session', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(twoTables);
+
+  render(<Sidebar selectedTable={{ sessionId: 's2', database: 'main', table: 'users' }} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+
+  const row = screen.getByText('users').closest('[role="treeitem"]') as HTMLElement;
+  expect(row.getAttribute('aria-selected')).toBe('false');
+});

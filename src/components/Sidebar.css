@@ -166,3 +166,17 @@
   cursor: pointer;
   align-self: flex-start;
 }
+
+/*
+ * The table whose rows are in the main pane. Main.dc.html draws it as
+ * `.row.on` — the --sel surface plus the heavier weight — which is the same
+ * treatment the grid gives a selected row, deliberately: it is one selection
+ * shown in two places, not two different states that happen to look alike.
+ *
+ * Kept distinct from :focus-visible above, which is where the keyboard is,
+ * not what the pane is showing. Arrow keys move one without moving the other.
+ */
+.sidebar-row.is-selected {
+  background: var(--color-sel);
+  font-weight: 500;
+}
