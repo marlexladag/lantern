@@ -2,7 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Read as text, not imported as modules: this test's whole job is to compare
 // two declarations that live on opposite sides of the IPC seam and cannot
 // import each other.
-import goSource from '../../internal/engine/dberr/dberr.go?raw';
+// The whole package, not just dberr.go. The Kind constants are a wire
+// contract with no build-time link between its two declarations, and this
+// test is now the only thing checking them against each other — so reading
+// one file of a package that may grow another is a blind spot in the only
+// check there is. Verified by planting `KindQuota Kind = "quota"` in a
+// second file: green before this glob, red after it.
+const goSources = import.meta.glob('../../internal/engine/dberr/*.go', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
 import tsSource from './connections.ts?raw';
 
 vi.mock('./engine', async () => {
@@ -124,9 +134,19 @@ describe('asDbError', () => {
  * time, and it would agree with whichever side was wrong.
  */
 describe('the DbErrorKind union and the engine`s Kind constants', () => {
-  /** `KindReadOnly Kind = "read_only"` in the const block. */
+  /**
+   * `KindReadOnly Kind = "read_only"`, whether it sits in a `const (…)`
+   * block or is declared on its own as `const KindQuota Kind = "quota"` —
+   * the second form is how a Kind would most naturally arrive in a new
+   * file, and is the exact shape this glob exists to catch.
+   */
   function goKinds(): string[] {
-    return [...goSource.matchAll(/^\s*Kind\w+\s+Kind\s*=\s*"([^"]+)"/gm)].map((m) => m[1]);
+    // _test.go files are excluded: a test may legitimately declare a Kind
+    // of its own as a fixture, and that is not part of the wire contract.
+    return Object.entries(goSources)
+      .filter(([path]) => !path.endsWith('_test.go'))
+      .flatMap(([, source]) => [...source.matchAll(/^\s*(?:const\s+)?Kind\w+\s+Kind\s*=\s*"([^"]+)"/gm)])
+      .map((m) => m[1]);
   }
 
   /** The string literals in this file's own `export type DbErrorKind` declaration. */
@@ -139,6 +159,9 @@ describe('the DbErrorKind union and the engine`s Kind constants', () => {
   // Two empty lists compare equal, so a regex that has quietly stopped
   // matching would make the real assertion below pass while checking nothing.
   it('finds both declarations to compare', () => {
+    // A glob that matched nothing would leave goKinds empty, and an empty
+    // list agrees with anything the same way two empty lists compare equal.
+    expect(Object.keys(goSources).length).toBeGreaterThan(0);
     expect(goKinds().length).toBeGreaterThan(5);
     expect(tsKinds().length).toBe(goKinds().length);
     expect(tsKinds()).toContain('read_only');
