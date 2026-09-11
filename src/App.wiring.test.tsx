@@ -63,6 +63,7 @@ vi.mock('./lib/connections', async () => {
     ...actual,
     listConnections: vi.fn(),
     openSession: vi.fn(),
+    loadTables: vi.fn(),
     loadColumns: vi.fn(),
     closeSession: vi.fn(),
   };
@@ -73,12 +74,13 @@ vi.mock('./lib/browse', async () => {
   return { ...actual, browsePage: vi.fn() };
 });
 
-import { listConnections, openSession, loadColumns, closeSession } from './lib/connections';
+import { listConnections, openSession, loadTables, loadColumns, closeSession } from './lib/connections';
 import { browsePage, type BrowsePage, type Value } from './lib/browse';
 import App from './App';
 
 const listMock = vi.mocked(listConnections);
 const openMock = vi.mocked(openSession);
+const tablesMock = vi.mocked(loadTables);
 const columnsMock = vi.mocked(loadColumns);
 const closeMock = vi.mocked(closeSession);
 const browseMock = vi.mocked(browsePage);
@@ -88,21 +90,18 @@ const conn = {
   color: '#3d7d55', read_only: false,
 };
 
+// session.open carries the DATABASE list alone; the tables arrive from
+// session.tables when `main` is expanded (spec §5's two tiers).
 const catalog = {
   session_id: 's1',
-  catalog: {
-    databases: [
-      {
-        name: 'main',
-        tables: [
-          { name: 'users', kind: 'table' as const },
-          { name: 'orders', kind: 'table' as const },
-        ],
-      },
-    ],
-  },
+  catalog: { databases: [{ name: 'main' }] },
   capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
 };
+
+const mainTables = [
+  { name: 'users', kind: 'table' as const },
+  { name: 'orders', kind: 'table' as const },
+];
 
 function v(kind: Value['kind'], text: string): Value {
   return { kind, text };
@@ -133,6 +132,7 @@ const SESSION_GONE = {
 beforeEach(() => {
   listMock.mockReset();
   openMock.mockReset();
+  tablesMock.mockReset();
   columnsMock.mockReset();
   closeMock.mockReset();
   browseMock.mockReset();
@@ -142,6 +142,7 @@ beforeEach(() => {
   ]);
   listMock.mockResolvedValue([conn]);
   openMock.mockResolvedValue(catalog);
+  tablesMock.mockResolvedValue(mainTables);
   harness.props = undefined;
   // jsdom implements no matchMedia; ResultGrid's colour-scheme listener needs
   // one to attach to. See ResultGrid.test.tsx for why the fake lives here.
@@ -155,11 +156,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Renders the app and expands the one connection, leaving both tables visible. */
+/**
+ * Renders the app and walks both lazy tiers — the connection, then the `main`
+ * database — leaving both tables visible.
+ */
 async function openConnection() {
   const view = render(<App />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
   await act(async () => { screen.getByText('local').click(); });
+  await act(async () => { (await screen.findByText('main')).click(); });
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   return view;
 }
@@ -193,10 +198,13 @@ it('shows a table’s rows when the table is chosen from the keyboard', async ()
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
 
   const tree = screen.getByRole('tree');
-  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the connection
+  await waitFor(() => expect(screen.getByText('main')).toBeDefined());
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the database
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
-  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the table
 
   await waitFor(() => expect(screen.getByTestId('cell-1-0').textContent).toBe('ama.osei@example.com'));
 });

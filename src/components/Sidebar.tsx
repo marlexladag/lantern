@@ -3,6 +3,7 @@ import {
   closeSession,
   listConnections,
   loadColumns,
+  loadTables,
   openSession,
   type Catalog,
   type Column,
@@ -35,6 +36,13 @@ type SessionState =
   | { status: 'error'; error: ErrorDescription }
   | { status: 'open'; sessionId: string; catalog: Catalog; expanded: boolean };
 
+interface DatabaseUiState {
+  expanded: boolean;
+  loading: boolean;
+  tables?: Table[];
+  error?: ErrorDescription;
+}
+
 interface TableUiState {
   expanded: boolean;
   loading: boolean;
@@ -42,40 +50,48 @@ interface TableUiState {
   error?: ErrorDescription;
 }
 
-function tableKey(connectionId: string, databaseName: string, tableName: string) {
-  return `${connectionId}\x00${databaseName}\x00${tableName}`;
+/**
+ * Both caches are keyed by the SESSION, never by the connection.
+ *
+ * A connection reopened after a failure — or after a collapse that closed
+ * it — is a different session against a database that may have been altered
+ * in between, so a cache keyed by connection id would hand the new session
+ * the old one's table and column lists and never refetch. The session id is
+ * also what every RPC these caches feed is addressed to, so keying by it is
+ * keying by the thing the data actually came from.
+ */
+function databaseKey(sessionId: string, databaseName: string) {
+  return `${sessionId}\x00${databaseName}`;
+}
+
+function tableKey(sessionId: string, databaseName: string, tableName: string) {
+  return `${sessionId}\x00${databaseName}\x00${tableName}`;
 }
 
 /**
- * Every table in a catalog, flattened, carrying the database it came from.
+ * A tables list as it actually arrives, not as the type promises.
  *
- * The two `?? []` guards are deliberately defensive and are NOT redundant
- * with the types: `Catalog` declares both of these as arrays, but Go's
- * encoding/json writes a nil slice as `null`, and that is exactly what the
- * engine sent for a database with no user tables. There is no error boundary
- * in App.tsx, so `.map` on one of those took the whole window blank. The
- * engine has since been fixed to send `[]`, which is why this guard stays:
- * the contract has now been proven not to enforce itself, and this is the
- * seam it crosses. Do not delete these because the type says they cannot
- * happen — that is precisely what was believed last time.
+ * `Table[]` is what `loadTables` declares, but Go's encoding/json writes a
+ * nil slice as `null`, and that is exactly what reached this component once
+ * before: there is no error boundary in App.tsx, so `.map` on it took the
+ * whole window blank. The engine's driver contract now guarantees a non-nil
+ * slice and internal/api deliberately does NOT re-normalize it — so that a
+ * driver breaking that contract is visible rather than papered over. This is
+ * the other side of that decision: the engine tells the truth, and the UI
+ * still refuses to blank the window over it. Do not delete this because the
+ * type says it cannot happen — that is precisely what was believed last time.
  */
-function flattenTables(catalog: Catalog): { databaseName: string; table: Table }[] {
-  const out: { databaseName: string; table: Table }[] = [];
-  for (const database of catalog.databases ?? []) {
-    for (const table of database.tables ?? []) {
-      out.push({ databaseName: database.name, table });
-    }
-  }
-  return out;
+function asTables(tables: Table[]): Table[] {
+  return tables ?? [];
 }
 
 type Row =
   | { kind: 'connection'; id: string; connection: Connection }
+  | { kind: 'database'; id: string; sessionId: string; databaseName: string }
   | {
       kind: 'table';
       id: string;
       sessionId: string;
-      connectionId: string;
       databaseName: string;
       table: Table;
     };
@@ -132,6 +148,7 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
   const [loaded, setLoaded] = useState(false);
   const [listError, setListError] = useState<ErrorDescription | null>(null);
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
+  const [databases, setDatabases] = useState<Record<string, DatabaseUiState>>({});
   const [tables, setTables] = useState<Record<string, TableUiState>>({});
   const [activeRowId, setActiveRowId] = useState<string | null>(null);
 
@@ -141,6 +158,30 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const rowRefs = useRef(new Map<string, HTMLElement>());
+
+  /**
+   * Generation counters for the in-flight `session.tables` requests, one per
+   * database rather than one for the whole tree.
+   *
+   * Same mechanism and same shape as EngineStatus's `generation` and
+   * ConnectionDialog's: capture before awaiting, compare after, drop the
+   * result if it no longer matches. A Map rather than a single number
+   * because these requests are genuinely concurrent — a user can expand
+   * three databases in a row — and one shared counter would make each expand
+   * silently retire the previous one's still-wanted response.
+   *
+   * Collapsing a database bumps its counter. That is the case the connection
+   * dialog got wrong on its first attempt: resetting state on open without
+   * cancelling what was already dispatched just means the stale answer
+   * arrives a moment later and lands on a view that has moved on.
+   */
+  const tableGenerations = useRef(new Map<string, number>());
+
+  function nextGeneration(key: string) {
+    const next = (tableGenerations.current.get(key) ?? 0) + 1;
+    tableGenerations.current.set(key, next);
+    return next;
+  }
 
   async function reload() {
     try {
@@ -190,21 +231,33 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
     for (const connection of connections) {
       out.push({ kind: 'connection', id: connection.id, connection });
       const session = sessions[connection.id];
-      if (session?.status === 'open' && session.expanded) {
-        for (const { databaseName, table } of flattenTables(session.catalog)) {
+      if (session?.status !== 'open' || !session.expanded) continue;
+      // `?? []` is deliberately defensive and is NOT redundant with the
+      // types: `Catalog` declares this an array, and Go's encoding/json
+      // writes a nil slice as `null`. See asTables above for the full story.
+      for (const database of session.catalog.databases ?? []) {
+        const dbKey = databaseKey(session.sessionId, database.name);
+        out.push({
+          kind: 'database',
+          id: dbKey,
+          sessionId: session.sessionId,
+          databaseName: database.name,
+        });
+        const dbUi = databases[dbKey];
+        if (!dbUi?.expanded) continue;
+        for (const table of dbUi.tables ?? []) {
           out.push({
             kind: 'table',
-            id: tableKey(connection.id, databaseName, table.name),
+            id: tableKey(session.sessionId, database.name, table.name),
             sessionId: session.sessionId,
-            connectionId: connection.id,
-            databaseName,
+            databaseName: database.name,
             table,
           });
         }
       }
     }
     return out;
-  }, [connections, sessions]);
+  }, [connections, sessions, databases]);
 
   // Roving tabIndex: keep the active row valid as the tree grows and
   // shrinks, defaulting to the first row once there is one.
@@ -258,12 +311,62 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
       });
   }
 
+  /**
+   * Expand or collapse one database, reading its table list the first time.
+   *
+   * Collapsing while a read is in flight retires that read rather than
+   * ignoring the click: a request nobody can still want is a request whose
+   * answer must not land, and leaving it live is how a node the user closed
+   * springs back open a second later.
+   */
+  function activateDatabase(sessionId: string, databaseName: string) {
+    const key = databaseKey(sessionId, databaseName);
+    const existing = databases[key];
+    if (existing?.expanded) {
+      nextGeneration(key);
+      setDatabases((prev) => ({
+        ...prev,
+        [key]: { ...existing, expanded: false, loading: false },
+      }));
+      return;
+    }
+    // Already read: flip visibility only, never refetch. An empty database
+    // is `[]`, which is still "read" — the reason this tests the property
+    // rather than the length.
+    if (existing?.tables) {
+      setDatabases((prev) => ({ ...prev, [key]: { ...existing, expanded: true } }));
+      return;
+    }
+    const gen = nextGeneration(key);
+    setDatabases((prev) => ({ ...prev, [key]: { expanded: true, loading: true } }));
+    loadTables(sessionId, databaseName)
+      .then((loaded) => {
+        if (gen !== tableGenerations.current.get(key)) return;
+        setDatabases((prev) => ({
+          ...prev,
+          [key]: { expanded: true, loading: false, tables: asTables(loaded) },
+        }));
+      })
+      .catch((err) => {
+        if (gen !== tableGenerations.current.get(key)) return;
+        const described = describeError(err);
+        if (described.kind === 'canceled') {
+          setDatabases((prev) => ({ ...prev, [key]: { expanded: false, loading: false } }));
+          return;
+        }
+        setDatabases((prev) => ({
+          ...prev,
+          [key]: { expanded: true, loading: false, error: described },
+        }));
+      });
+  }
+
   // Takes `sessionId` from the caller rather than looking it up, because
   // every call site (a click on a rendered table row, or Enter on one via
   // the keyboard) only exists in the first place because that table's
   // session is already open — there is no code path that reaches this
   // function without one, so there is nothing to defend against here.
-  function activateTable(sessionId: string, connectionId: string, databaseName: string, table: Table) {
+  function activateTable(sessionId: string, databaseName: string, table: Table) {
     // Raised FIRST, ahead of every early return below, because activating a
     // table always means "show me this one" even when it means nothing else:
     // the second click on an expanded table collapses its column list, and
@@ -271,7 +374,7 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
     // the main pane at the same time — one gesture hiding two different
     // things. A click while the columns are still loading is the same story.
     onSelectTable?.(sessionId, databaseName, table.name);
-    const key = tableKey(connectionId, databaseName, table.name);
+    const key = tableKey(sessionId, databaseName, table.name);
     const existing = tables[key];
     // Already loaded: flip visibility only, never refetch.
     if (existing?.columns) {
@@ -299,7 +402,8 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
 
   function activateRow(row: Row) {
     if (row.kind === 'connection') toggleConnection(row.connection);
-    else activateTable(row.sessionId, row.connectionId, row.databaseName, row.table);
+    else if (row.kind === 'database') activateDatabase(row.sessionId, row.databaseName);
+    else activateTable(row.sessionId, row.databaseName, row.table);
   }
 
   function handleTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
@@ -363,7 +467,8 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
           {connections.map((connection) => {
             const session = sessions[connection.id];
             const isOpen = session?.status === 'open' && session.expanded;
-            const catalogTables = session?.status === 'open' ? flattenTables(session.catalog) : [];
+            const catalogDatabases =
+              session?.status === 'open' ? session.catalog.databases ?? [] : [];
             return (
               <div key={connection.id}>
                 <div
@@ -399,51 +504,96 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
                   // An open connection with nothing under it says so. Silence
                   // here is indistinguishable from a catalog that failed to
                   // load, which is the same defect in a different disguise.
-                  (catalogTables.length === 0 ? (
-                    <div className="sidebar-status">No tables</div>
+                  (catalogDatabases.length === 0 ? (
+                    <div className="sidebar-status">No databases</div>
                   ) : (
-                    catalogTables.map(({ databaseName, table }) => {
-                      const key = tableKey(connection.id, databaseName, table.name);
-                      const ui = tables[key];
-                      const rowId = key;
-                      const isSelected =
-                        selectedTable?.sessionId === session.sessionId &&
-                        selectedTable.database === databaseName &&
-                        selectedTable.table === table.name;
+                    catalogDatabases.map((database) => {
+                      const dbKey = databaseKey(session.sessionId, database.name);
+                      const dbUi = databases[dbKey];
                       return (
-                        <div key={rowId}>
+                        <div key={dbKey}>
                           <div
                             role="treeitem"
-                            aria-expanded={ui?.expanded ?? false}
-                            // Only table rows carry this: a connection row is
-                            // not something the main pane can show, so
-                            // claiming it is unselected would be a state it
-                            // does not have.
-                            aria-selected={isSelected}
-                            tabIndex={activeRowId === rowId ? 0 : -1}
-                            ref={(el) => setRowRef(rowId, el)}
-                            className={`sidebar-row is-table${isSelected ? ' is-selected' : ''}`}
+                            aria-expanded={dbUi?.expanded ?? false}
+                            tabIndex={activeRowId === dbKey ? 0 : -1}
+                            ref={(el) => setRowRef(dbKey, el)}
+                            className="sidebar-row is-db"
                             onClick={() => {
-                              setActiveRowId(rowId);
-                              activateTable(session.sessionId, connection.id, databaseName, table);
+                              setActiveRowId(dbKey);
+                              activateDatabase(session.sessionId, database.name);
                             }}
                           >
-                            <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>&#9656;</span>
-                            <span>{table.name}</span>
+                            <span className={`sidebar-caret${dbUi?.expanded ? ' is-open' : ''}`}>
+                              &#9656;
+                            </span>
+                            <span>{database.name}</span>
                           </div>
-                          {ui?.loading && <div className="sidebar-status">Loading columns…</div>}
-                          {ui?.error && (
-                            <div role="alert" className="sidebar-error">
-                              <ErrorText description={ui.error} />
+                          {dbUi?.loading && (
+                            <div className="sidebar-status at-db">Loading tables…</div>
+                          )}
+                          {dbUi?.error && (
+                            <div role="alert" className="sidebar-error at-db">
+                              <ErrorText description={dbUi.error} />
                             </div>
                           )}
-                          {ui?.expanded &&
-                            ui.columns?.map((column) => (
-                              <div key={column.name} className="sidebar-column">
-                                <span className="sidebar-column-name">{column.name}</span>
-                                {column.primary_key && <span className="sidebar-pk">PK</span>}
-                                <span className="sidebar-column-type">{column.data_type}</span>
-                              </div>
+                          {dbUi?.expanded &&
+                            dbUi.tables &&
+                            // A database that has been read and holds nothing
+                            // says so. A database that draws blank is
+                            // indistinguishable from one that failed to load.
+                            (dbUi.tables.length === 0 ? (
+                              <div className="sidebar-status at-db">No tables</div>
+                            ) : (
+                              dbUi.tables.map((table) => {
+                                const rowId = tableKey(session.sessionId, database.name, table.name);
+                                const ui = tables[rowId];
+                                const isSelected =
+                                  selectedTable?.sessionId === session.sessionId &&
+                                  selectedTable.database === database.name &&
+                                  selectedTable.table === table.name;
+                                return (
+                                  <div key={rowId}>
+                                    <div
+                                      role="treeitem"
+                                      aria-expanded={ui?.expanded ?? false}
+                                      // Only table rows carry this: a
+                                      // connection or database row is not
+                                      // something the main pane can show, so
+                                      // claiming it is unselected would be a
+                                      // state it does not have.
+                                      aria-selected={isSelected}
+                                      tabIndex={activeRowId === rowId ? 0 : -1}
+                                      ref={(el) => setRowRef(rowId, el)}
+                                      className={`sidebar-row is-table${isSelected ? ' is-selected' : ''}`}
+                                      onClick={() => {
+                                        setActiveRowId(rowId);
+                                        activateTable(session.sessionId, database.name, table);
+                                      }}
+                                    >
+                                      <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>
+                                        &#9656;
+                                      </span>
+                                      <span>{table.name}</span>
+                                    </div>
+                                    {ui?.loading && (
+                                      <div className="sidebar-status at-table">Loading columns…</div>
+                                    )}
+                                    {ui?.error && (
+                                      <div role="alert" className="sidebar-error at-table">
+                                        <ErrorText description={ui.error} />
+                                      </div>
+                                    )}
+                                    {ui?.expanded &&
+                                      ui.columns?.map((column) => (
+                                        <div key={column.name} className="sidebar-column">
+                                          <span className="sidebar-column-name">{column.name}</span>
+                                          {column.primary_key && <span className="sidebar-pk">PK</span>}
+                                          <span className="sidebar-column-type">{column.data_type}</span>
+                                        </div>
+                                      ))}
+                                  </div>
+                                );
+                              })
                             ))}
                         </div>
                       );

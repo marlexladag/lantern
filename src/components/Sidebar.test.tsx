@@ -19,22 +19,30 @@ vi.mock('../lib/connections', async () => {
     ...actual,
     listConnections: vi.fn(),
     openSession: vi.fn(),
+    loadTables: vi.fn(),
     loadColumns: vi.fn(),
     closeSession: vi.fn(),
   };
 });
 
-import { listConnections, openSession, loadColumns, closeSession } from '../lib/connections';
+import {
+  listConnections, openSession, loadTables, loadColumns, closeSession, type Table,
+} from '../lib/connections';
 import { Sidebar, ADD_CONNECTION_EVENT, CONNECTIONS_CHANGED_EVENT } from './Sidebar';
 
 const listMock = vi.mocked(listConnections);
 const openMock = vi.mocked(openSession);
+const tablesMock = vi.mocked(loadTables);
 const columnsMock = vi.mocked(loadColumns);
 const closeMock = vi.mocked(closeSession);
 
+// session.open returns the DATABASE list alone now (spec §5's two tiers):
+// no `tables` key, because the engine no longer reads one on connect. A
+// fixture that still carried tables would be testing a wire shape the engine
+// cannot produce.
 const openResult = {
   session_id: 's1',
-  catalog: { databases: [{ name: 'main', tables: [{ name: 'users', kind: 'table' as const }] }] },
+  catalog: { databases: [{ name: 'main' }] },
   capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
 };
 
@@ -47,12 +55,25 @@ const conn = {
   color: '#3d7d55', read_only: false,
 };
 
+/**
+ * Two tiers now stand between a connection and its tables — the connection,
+ * then the database — because introspection is lazy in exactly those tiers
+ * (spec §5). Every test that wants a table on screen walks both, so the walk
+ * is one helper rather than a copy-paste that would drift.
+ */
+async function expandToTables(connectionName = 'local', databaseName = 'main') {
+  await act(async () => { screen.getByText(connectionName).click(); });
+  await act(async () => { (await screen.findByText(databaseName)).click(); });
+}
+
 beforeEach(() => {
   listMock.mockReset();
   openMock.mockReset();
+  tablesMock.mockReset();
   columnsMock.mockReset();
   closeMock.mockReset();
   closeMock.mockResolvedValue({ closed: true });
+  tablesMock.mockResolvedValue([{ name: 'users', kind: 'table' }]);
 });
 
 it('shows an empty state when there are no connections', async () => {
@@ -69,15 +90,11 @@ it('lists saved connections', async () => {
 
 it('opens a session and shows the tables when a connection is clicked', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockResolvedValue({
-    session_id: 's1',
-    catalog: { databases: [{ name: 'main', tables: [{ name: 'users', kind: 'table' }] }] },
-    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
-  });
+  openMock.mockResolvedValue(openResult);
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
 
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   expect(openMock).toHaveBeenCalledWith('a1');
@@ -97,7 +114,7 @@ it('loads a table’s columns only when it is expanded', async () => {
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   expect(columnsMock).not.toHaveBeenCalled();
@@ -113,7 +130,7 @@ it('collapses and re-expands an already-open connection without re-opening the s
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('local').click(); }); // collapse
@@ -146,7 +163,7 @@ it('caches a table’s columns after the first load and never refetches on repea
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('users').click(); });
@@ -175,7 +192,7 @@ it('retries session.open after a prior failure instead of getting stuck', async 
   await act(async () => { screen.getByText('local').click(); });
   await waitFor(() => expect(screen.getByText(/disk error/i)).toBeDefined());
 
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   expect(openMock).toHaveBeenCalledTimes(2);
 });
@@ -195,7 +212,7 @@ it('renders nothing for a canceled session.open and leaves the row retryable', a
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByText('users')).toBeNull();
 
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 });
 
@@ -208,7 +225,7 @@ it('shows the engine message inline when loading columns fails', async () => {
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   await act(async () => { screen.getByText('users').click(); });
 
@@ -225,7 +242,7 @@ it('renders nothing for a canceled loadColumns and leaves the table collapsed, n
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('users').click(); });
@@ -247,14 +264,12 @@ it('renders nothing for a canceled loadColumns and leaves the table collapsed, n
 // neither case had a fixture.
 it('renders an explicit empty state for a database with no tables', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockResolvedValue({
-    ...openResult,
-    catalog: { databases: [{ name: 'main', tables: [] }] },
-  });
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockResolvedValue([]);
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
 
   // Not nothing: a database that renders blank is indistinguishable from one
   // that failed to load.
@@ -262,19 +277,21 @@ it('renders an explicit empty state for a database with no tables', async () => 
 });
 
 // The exact wire shape: Go's encoding/json writes a nil slice as `null`,
-// which arrives here as null however confidently `Catalog` declares
-// `tables: Table[]`. There is no error boundary in App.tsx, so `.map` on it
-// blanks the whole window.
-it('survives a database whose tables arrive as null on the wire', async () => {
+// which arrives here as null however confidently `loadTables` declares
+// `Table[]`. There is no error boundary in App.tsx, so `.map` on it blanks
+// the whole window. This is session.tables' risk now rather than
+// session.open's: internal/api deliberately returns the driver's slice
+// unaltered, precisely so a driver that broke the non-nil contract is
+// visible — which means it is visible HERE, and must read as "no tables"
+// rather than as a blank window.
+it('survives a session.tables response that arrives as null on the wire', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockResolvedValue({
-    ...openResult,
-    catalog: { databases: [{ name: 'main', tables: null as unknown as [] }] },
-  });
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockResolvedValue(null as unknown as Table[]);
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
 
   await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
   // Still a live sidebar, not a blank window.
@@ -292,8 +309,12 @@ it('survives a catalog whose databases arrive as null on the wire', async () => 
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
   await act(async () => { screen.getByText('local').click(); });
 
-  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+  // "No databases", not "No tables": a connection with no database tier to
+  // draw is a different thing from a database that holds nothing, and
+  // reporting the wrong one sends the reader looking in the wrong place.
+  await waitFor(() => expect(screen.getByText(/no databases/i)).toBeDefined());
   expect(screen.getByText('local')).toBeDefined();
+  expect(tablesMock).not.toHaveBeenCalled();
 });
 
 it('shows the engine message inline when listConnections fails', async () => {
@@ -412,7 +433,7 @@ it('closes every open session on unmount so the engine is not left holding a han
 
   const { unmount } = render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   unmount();
@@ -445,8 +466,19 @@ it('moves the roving selection with ArrowDown/ArrowUp, clamping at both ends, an
 
   // Enter on the initially-active first row opens its session.
   await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
-  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  await waitFor(() => expect(screen.getByText('main')).toBeDefined());
   expect(openMock).toHaveBeenCalledWith('a1');
+
+  // Move onto the newly-revealed DATABASE row and expand that with Enter.
+  // A tier that can only be opened with a mouse is a regression (spec §12),
+  // so the new depth is walked by keyboard here exactly like the others.
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
+  const mainRow = screen.getByText('main').closest('[role="treeitem"]') as HTMLElement;
+  expect(document.activeElement).toBe(mainRow);
+
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledWith('s1', 'main');
 
   // Move onto the newly-revealed table row and expand it with Enter.
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
@@ -463,8 +495,10 @@ it('moves the roving selection with ArrowDown/ArrowUp, clamping at both ends, an
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
   expect(document.activeElement).toBe(otherRow);
 
-  // ArrowUp walks back; clamp at the top.
+  // ArrowUp walks back through all four rows; clamp at the top.
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowUp' }); });
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowUp' }); });
+  expect(document.activeElement).toBe(mainRow);
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowUp' }); });
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowUp' }); });
   expect(document.activeElement).toBe(localRow);
@@ -502,7 +536,7 @@ it('does not start a second columns fetch for a table while the first is still i
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('users').click(); });
@@ -543,7 +577,7 @@ it('renders the engine message when loadColumns rejects with a non-database engi
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   await act(async () => { screen.getByText('users').click(); });
 
@@ -580,7 +614,7 @@ it('swallows a rejection from closeSession on unmount instead of crashing', asyn
 
   const { unmount } = render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   expect(() => unmount()).not.toThrow();
@@ -609,20 +643,10 @@ it('clears the active row when the connection list empties out after a refetch',
 // second affordance.
 // ---------------------------------------------------------------------------
 
-const twoTables = {
-  ...openResult,
-  catalog: {
-    databases: [
-      {
-        name: 'main',
-        tables: [
-          { name: 'users', kind: 'table' as const },
-          { name: 'orders', kind: 'table' as const },
-        ],
-      },
-    ],
-  },
-};
+const twoTables: Table[] = [
+  { name: 'users', kind: 'table' },
+  { name: 'orders', kind: 'table' },
+];
 
 it('raises the selected table when a table row is clicked, as well as expanding it', async () => {
   const onSelectTable = vi.fn();
@@ -632,7 +656,7 @@ it('raises the selected table when a table row is clicked, as well as expanding 
 
   render(<Sidebar onSelectTable={onSelectTable} />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   expect(onSelectTable).not.toHaveBeenCalled();
@@ -657,7 +681,7 @@ it('raises the selection again when an already-expanded table is clicked', async
 
   render(<Sidebar onSelectTable={onSelectTable} />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('users').click(); });
@@ -679,7 +703,7 @@ it('raises the selection even while the columns fetch is still in flight', async
 
   render(<Sidebar onSelectTable={onSelectTable} />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   await act(async () => { screen.getByText('users').click(); });
@@ -704,7 +728,12 @@ it('raises the selection from the keyboard, not only from the mouse', async () =
 
   const tree = screen.getByRole('tree');
   await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // open the connection
+  await waitFor(() => expect(screen.getByText('main')).toBeDefined());
+
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); }); // onto the database row
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // expand it
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  expect(onSelectTable).not.toHaveBeenCalled(); // opening a database selects nothing
 
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); }); // onto the table row
   expect(onSelectTable).not.toHaveBeenCalled(); // moving is not selecting
@@ -721,7 +750,7 @@ it('raises no selection when a connection row is activated', async () => {
 
   render(<Sidebar onSelectTable={onSelectTable} />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   expect(onSelectTable).not.toHaveBeenCalled();
@@ -732,11 +761,12 @@ it('raises no selection when a connection row is activated', async () => {
 // a highlight comes to point at a different table than the grid shows.
 it('marks the selected table row, and only that one', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockResolvedValue(twoTables);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockResolvedValue(twoTables);
 
   const { rerender } = render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
 
   const rowOf = (name: string) =>
@@ -759,13 +789,263 @@ it('marks the selected table row, and only that one', async () => {
 // table name.
 it('marks nothing when the selection names a different session', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockResolvedValue(twoTables);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockResolvedValue(twoTables);
 
   render(<Sidebar selectedTable={{ sessionId: 's2', database: 'main', table: 'users' }} />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-  await act(async () => { screen.getByText('local').click(); });
+  await expandToTables();
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
 
   const row = screen.getByText('users').closest('[role="treeitem"]') as HTMLElement;
   expect(row.getAttribute('aria-selected')).toBe('false');
+});
+
+
+// ---------------------------------------------------------------------------
+// The database tier (Task 2)
+// ---------------------------------------------------------------------------
+
+it('renders a database tier and loads its tables on expand', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    session_id: 's1',
+    catalog: { databases: [{ name: 'main' }] },
+    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+  });
+  tablesMock.mockResolvedValue([{ name: 'alpha', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  // The database is on screen and its tables are NOT yet fetched.
+  await screen.findByText('main');
+  expect(tablesMock).not.toHaveBeenCalled();
+
+  await act(async () => { screen.getByText('main').click(); });
+  await screen.findByText('alpha');
+  expect(tablesMock).toHaveBeenCalledWith('s1', 'main');
+});
+
+// Adversarial: the wire shape that blanked the window once.
+it('survives a database whose tables arrive as null', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    session_id: 's1',
+    catalog: { databases: [{ name: 'main', tables: null as unknown as Table[] }] },
+    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+  });
+  tablesMock.mockResolvedValue([]);
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await act(async () => { (await screen.findByText('main')).click(); });
+  expect(await screen.findByText(/no tables/i)).toBeDefined();
+});
+
+// Adversarial: an in-flight tables request must not land after the user has
+// collapsed the database that asked for it. EngineStatus and ConnectionDialog
+// both use a generation guard; reuse its shape rather than inventing a third.
+it('drops a tables response for a database the user has since collapsed', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    session_id: 's1',
+    catalog: { databases: [{ name: 'main' }] },
+    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+  });
+  // Resolve only when the test says so, so the response lands AFTER the
+  // collapse. A test that awaits the request before collapsing is testing the
+  // wrong thing: that shape is what let this same defect survive a first fix
+  // in the connection dialog.
+  let release!: (tables: Table[]) => void;
+  tablesMock.mockReturnValue(new Promise<Table[]>((resolve) => { release = resolve; }));
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await act(async () => { (await screen.findByText('main')).click(); });
+
+  // Collapse it again while the request is still in flight.
+  await act(async () => { screen.getByText('main').click(); });
+  await act(async () => { release([{ name: 'alpha', kind: 'table' }]); });
+
+  expect(screen.queryByText('alpha')).toBeNull();
+});
+
+it('caches a database’s tables and never refetches on repeated expand/collapse', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(1);
+
+  // Collapse — the tables disappear, but the fetch is not repeated.
+  await act(async () => { screen.getByText('main').click(); });
+  expect(screen.queryByText('users')).toBeNull();
+
+  // Expand again — still no second fetch.
+  await act(async () => { screen.getByText('main').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(1);
+});
+
+// An empty database is READ, not unread: `[]` must satisfy the cache the
+// same way a populated list does, or expanding an empty database would
+// re-ask the engine every single time.
+it('caches an empty database’s table list rather than refetching it', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockResolvedValue([]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+
+  await act(async () => { screen.getByText('main').click(); }); // collapse
+  await act(async () => { screen.getByText('main').click(); }); // expand again
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(1);
+});
+
+it('shows the engine message inline when loading a database’s tables fails', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockRejectedValue({
+    code: -32020, message: 'boom', data: { kind: 'unknown', message: 'schema is locked' },
+  });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+
+  await waitFor(() => expect(screen.getByText(/schema is locked/i)).toBeDefined());
+});
+
+it('renders nothing for a canceled session.tables and leaves the database collapsed, not stuck loading', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockRejectedValueOnce({
+    code: -32020, message: 'canceled', data: { kind: 'canceled', message: 'canceled' },
+  });
+  tablesMock.mockResolvedValueOnce([{ name: 'users', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+  await waitFor(() => expect(tablesMock).toHaveBeenCalledTimes(1));
+
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByText('users')).toBeNull();
+  expect(screen.queryByText(/loading tables/i)).toBeNull();
+
+  // Retryable: expanding again issues a fresh fetch, since the canceled one
+  // never populated the cache.
+  await act(async () => { screen.getByText('main').click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(2);
+});
+
+// The other half of the generation guard: dropping the stale response must
+// not also drop the fresh one the re-expand asked for. A guard that retired
+// the request and then ignored its successor would leave the node spinning
+// forever, which looks nothing like the bug it was added to fix.
+it('refetches after a collapse and renders the second response', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  let release!: (tables: Table[]) => void;
+  tablesMock.mockReturnValueOnce(new Promise<Table[]>((resolve) => { release = resolve; }));
+  tablesMock.mockResolvedValueOnce([{ name: 'orders', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+  await act(async () => { screen.getByText('main').click(); }); // collapse, mid-flight
+  await act(async () => { screen.getByText('main').click(); }); // expand again
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+
+  // The retired response lands last and changes nothing.
+  await act(async () => { release([{ name: 'alpha', kind: 'table' }]); });
+  expect(screen.queryByText('alpha')).toBeNull();
+  expect(screen.getByText('orders')).toBeDefined();
+});
+
+// The cache is keyed by the SESSION, not by the database name — two
+// connections both holding a `main` are the common case, not the exotic one,
+// and a key that was only the database name would hand the second one the
+// first one's tables.
+//
+// Session id rather than connection id is the deliberate choice one step
+// further on: a connection reopened after a failure is a NEW session against
+// a database that may have changed in between, and a connection-keyed cache
+// would hand it the dead session's tables and never refetch. That half is
+// not observable from the UI today — nothing in it can replace a live
+// session, so a connection never has two — which is exactly why it is
+// written down here rather than left to be rediscovered when a reconnect
+// affordance arrives.
+it('keeps two connections’ identically-named databases apart', async () => {
+  const other = { ...conn, id: 'a2', name: 'other' };
+  listMock.mockResolvedValue([conn, other]);
+  openMock.mockResolvedValueOnce(openResult);
+  openMock.mockResolvedValueOnce({ ...openResult, session_id: 's2' });
+  tablesMock.mockResolvedValueOnce([{ name: 'users', kind: 'table' }]);
+  tablesMock.mockResolvedValueOnce([{ name: 'orders', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await act(async () => { screen.getByText('other').click(); });
+  await waitFor(() => expect(screen.getAllByText('main')).toHaveLength(2));
+
+  const [firstMain, secondMain] = screen.getAllByText('main');
+  await act(async () => { firstMain.click(); });
+  await waitFor(() => expect(screen.getByText('users')).toBeDefined());
+  await act(async () => { secondMain.click(); });
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+
+  expect(tablesMock).toHaveBeenNthCalledWith(1, 's1', 'main');
+  expect(tablesMock).toHaveBeenNthCalledWith(2, 's2', 'main');
+  // Both lists are on screen at once: neither database took the other's.
+  expect(screen.getByText('users')).toBeDefined();
+  expect(screen.getByText('orders')).toBeDefined();
+});
+
+it('renders the engine message when session.tables rejects with a non-database engine error', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  tablesMock.mockRejectedValue(ENGINE_DIED);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toBe('the engine died');
+  expect(alert.textContent).not.toContain('[object');
+});
+
+// The rejection half of the same guard. A failure that lands after the user
+// has moved on is still a failure that must not land: a banner appearing
+// under a node the user closed is the same stale-response bug wearing the
+// error surface instead of the data one.
+it('drops a tables REJECTION for a database the user has since collapsed', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  let fail!: (err: unknown) => void;
+  tablesMock.mockReturnValue(new Promise<Table[]>((_, reject) => { fail = reject; }));
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+  await act(async () => { screen.getByText('main').click(); }); // collapse, mid-flight
+  await act(async () => {
+    fail({ code: -32020, message: 'boom', data: { kind: 'unknown', message: 'schema is locked' } });
+  });
+
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.queryByText(/schema is locked/i)).toBeNull();
 });

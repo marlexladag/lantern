@@ -50,13 +50,19 @@
   outline-offset: -2px;
 }
 
-.sidebar-row.is-table {
+/*
+ * Three tiers, one step each: connection (10px, the base rule above),
+ * database, table — then columns at 70px below. Introspection is lazy in
+ * exactly these tiers (spec section 5), so the indentation is the tier
+ * structure made visible rather than decoration.
+ */
+.sidebar-row.is-db {
   padding-left: 30px;
+  font-weight: 500;
 }
 
-.sidebar-row.is-db {
-  padding-left: 10px;
-  font-weight: 500;
+.sidebar-row.is-table {
+  padding-left: 50px;
 }
 
 .sidebar-dot {
@@ -103,18 +109,34 @@
   transform: rotate(90deg);
 }
 
+/*
+ * Status and error lines sit under the row they belong to, so they indent
+ * with it: the base rule is the connection tier ("Opening…"), `.at-db` the
+ * database tier ("Loading tables…", "No tables") and `.at-table` the table
+ * tier ("Loading columns…"). A line that failed to indent would read as
+ * belonging to whichever row it happened to sit beneath.
+ */
 .sidebar-status {
   font-size: var(--text-label);
   color: var(--color-dim);
   padding-left: 30px;
 }
 
+.sidebar-status.at-db {
+  padding-left: 50px;
+}
+
+.sidebar-status.at-table {
+  padding-left: 70px;
+}
+
 /*
- * Covers all three sidebar failure surfaces: the connection list failing to
- * load, a session failing to open, and a table's columns failing to load.
- * All three are retryable (reload, reopen, re-expand) rather than
- * destructive, so they use --color-warn — --color-danger is reserved for
- * production and destructive actions (Foundations.dc.html).
+ * Covers all four sidebar failure surfaces: the connection list failing to
+ * load, a session failing to open, a database's table list failing to load,
+ * and a table's columns failing to load. All four are retryable (reload,
+ * reopen, re-expand) rather than destructive, so they use --color-warn —
+ * --color-danger is reserved for production and destructive actions
+ * (Foundations.dc.html).
  */
 .sidebar-error {
   font-size: var(--text-label);
@@ -124,12 +146,20 @@
   word-break: break-word;
 }
 
+.sidebar-error.at-db {
+  padding-left: 50px;
+}
+
+.sidebar-error.at-table {
+  padding-left: 70px;
+}
+
 .sidebar-column {
   display: flex;
   align-items: center;
   gap: 6px;
   height: var(--row-sidebar);
-  padding: 0 10px 0 50px;
+  padding: 0 10px 0 70px;
   font-size: var(--text-body);
   color: var(--color-text);
 }

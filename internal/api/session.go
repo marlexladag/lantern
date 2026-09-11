@@ -132,6 +132,16 @@ type openResult struct {
 	Caps      driver.Capabilities `json:"capabilities"`
 }
 
+// tablesParams names the database whose table list to read. Database is not
+// optional and has no default: driver.Conn.Tables treats an unknown database
+// as an error precisely so a driver that ignores the parameter cannot pass
+// for one that honours it, and a seam that quietly substituted "the only
+// database" here would hide exactly that.
+type tablesParams struct {
+	SessionID string `json:"session_id"`
+	Database  string `json:"database"`
+}
+
 type columnsParams struct {
 	SessionID string `json:"session_id"`
 	Database  string `json:"database"`
@@ -199,6 +209,31 @@ func RegisterSession(srv *rpc.Server, st *store.Store, sess *Sessions) {
 		keepOpen = true
 
 		return openResult{SessionID: id, Catalog: catalog, Caps: drv.Capabilities()}, nil
+	})
+
+	// The second introspection tier (spec section 5): session.open returns
+	// the database list alone, and one database's tables are read here, when
+	// the user expands it.
+	srv.Register("session.tables", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p tablesParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, rpc.Errorf(rpc.CodeInvalidParams, "session.tables: "+err.Error())
+		}
+		conn, err := sess.get(p.SessionID)
+		if err != nil {
+			return nil, ToRPCError(err)
+		}
+		tables, err := conn.Tables(ctx, p.Database)
+		if err != nil {
+			return nil, ToRPCError(err)
+		}
+		// Returned as the driver handed it over, deliberately not
+		// re-normalized to a non-nil slice here: Conn.Tables already
+		// guarantees non-nil for an empty database, and a second guard at
+		// this seam would turn a driver that broke that contract into a
+		// silently passing one — the shell would see [] and nobody would
+		// ever learn the driver sends null.
+		return tables, nil
 	})
 
 	srv.Register("session.columns", func(ctx context.Context, raw json.RawMessage) (any, error) {

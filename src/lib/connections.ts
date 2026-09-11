@@ -62,8 +62,21 @@ export interface Table {
   columns?: Column[];
 }
 
+export interface Database {
+  name: string;
+  /**
+   * Absent from session.open. Introspection is two-tiered (spec section 5):
+   * session.open returns the DATABASE list alone and leaves this unset, and
+   * a database's tables are read by `loadTables` when it is expanded. The
+   * field stays declared because Go's `json:"tables"` still writes the key —
+   * as the literal `null` — and a consumer that trusted the old shape would
+   * otherwise be told by the type that it cannot be there at all.
+   */
+  tables?: Table[];
+}
+
 export interface Catalog {
-  databases: { name: string; tables: Table[] }[];
+  databases: Database[];
 }
 
 export interface TestResult {
@@ -117,6 +130,13 @@ export const deleteConnection = (id: string) =>
 
 export const openSession = (connectionId: string) =>
   request<OpenResult>('session.open', { connection_id: connectionId });
+
+/**
+ * The second introspection tier: one database's tables, read when the user
+ * expands it rather than when the connection is opened.
+ */
+export const loadTables = (sessionId: string, database: string) =>
+  request<Table[]>('session.tables', { session_id: sessionId, database });
 
 export const loadColumns = (sessionId: string, database: string, table: string) =>
   request<Column[]>('session.columns', { session_id: sessionId, database, table });

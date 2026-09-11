@@ -23,7 +23,7 @@ vi.mock('./engine', async () => {
 import { request } from './engine';
 import {
   listConnections, saveConnection, testConnection, deleteConnection,
-  openSession, loadColumns, closeSession, asDbError,
+  openSession, loadTables, loadColumns, closeSession, asDbError,
 } from './connections';
 
 const requestMock = vi.mocked(request);
@@ -75,6 +75,13 @@ describe('method names and shapes', () => {
     const res = await openSession('a1');
     expect(requestMock).toHaveBeenCalledWith('session.open', { connection_id: 'a1' });
     expect(res.session_id).toBe('s1');
+  });
+
+  it('loads one database\'s tables', async () => {
+    requestMock.mockResolvedValue([{ name: 'alpha', kind: 'table' }]);
+    const got = await loadTables('s1', 'main');
+    expect(requestMock).toHaveBeenCalledWith('session.tables', { session_id: 's1', database: 'main' });
+    expect(got).toEqual([{ name: 'alpha', kind: 'table' }]);
   });
 
   it('loads columns on demand', async () => {

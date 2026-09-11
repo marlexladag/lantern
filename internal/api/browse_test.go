@@ -44,12 +44,14 @@ func seedItems(t *testing.T, dbPath string, n int) {
 	}
 }
 
-// openBrowseSession saves h.db as a connection and opens a session against
+// openSession saves h.db as a connection and opens a session against
 // it, returning the session id. Mirrors the save-then-open sequence every
 // existing session.* test in api_test.go and coverage_test.go repeats
-// inline; browse's tests need it just as often, so it is worth a helper
-// here without touching those files' own established pattern.
-func openBrowseSession(t *testing.T, h *harness) string {
+// inline; browse's and session.tables' tests need it just as often, so it is
+// worth a helper without touching those files' own established pattern. It
+// lives here rather than in session_test.go only because browse's tests
+// needed it first; both files use it.
+func openSession(t *testing.T, h *harness) string {
 	t.Helper()
 	saved, err := h.call(t, "connections.save", map[string]any{
 		"connection": map[string]any{"name": "fixture", "driver": "sqlite", "file": h.db, "color": "#3d7d55"},
@@ -98,7 +100,7 @@ type browsePage struct {
 func TestBrowsePageReturnsColumnsRowsAndCellsAsKindText(t *testing.T) {
 	h := newHarness(t)
 	seedItems(t, h.db, 4)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	out, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "items", "limit": 10,
@@ -132,7 +134,7 @@ func TestBrowsePageReturnsColumnsRowsAndCellsAsKindText(t *testing.T) {
 func TestBrowseAfterReturnsTheNextDistinctRows(t *testing.T) {
 	h := newHarness(t)
 	seedItems(t, h.db, 6)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	out1, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "items", "limit": 4,
@@ -205,7 +207,7 @@ func TestBrowseAfterReturnsTheNextDistinctRows(t *testing.T) {
 func TestBrowseSortTokenRoundTripsThroughRawJSON(t *testing.T) {
 	h := newHarness(t)
 	seedItems(t, h.db, 5)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	handler, ok := h.srv.Handler("browse.page")
 	if !ok {
@@ -286,7 +288,7 @@ func TestBrowseReportsNotFoundForAnUnknownSessionID(t *testing.T) {
 
 func TestBrowseReportsInvalidForAZeroLimit(t *testing.T) {
 	h := newHarness(t)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	_, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "users", "limit": 0,
@@ -305,7 +307,7 @@ func TestBrowseReportsInvalidForAZeroLimit(t *testing.T) {
 // error, not be silently clamped.
 func TestBrowseReportsInvalidForALimitAboveMaxBrowseLimit(t *testing.T) {
 	h := newHarness(t)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	_, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "users", "limit": driver.MaxBrowseLimit + 1,
@@ -320,7 +322,7 @@ func TestBrowseReportsInvalidForALimitAboveMaxBrowseLimit(t *testing.T) {
 
 func TestBrowseReportsNotFoundForAMissingTable(t *testing.T) {
 	h := newHarness(t)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	_, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "does_not_exist", "limit": 10,
@@ -393,7 +395,7 @@ func TestBrowseReportsUnsupportedForADriverWithoutBrowser(t *testing.T) {
 // decode identically into a Go []T — the bug lives entirely in the bytes.
 func TestBrowseOnAnEmptyTableSerializesRowsAsAnEmptyArray(t *testing.T) {
 	h := newHarness(t)
-	sessionID := openBrowseSession(t, h) // `users`, from newHarness, has zero rows.
+	sessionID := openSession(t, h) // `users`, from newHarness, has zero rows.
 
 	out, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "users", "limit": 10,
@@ -415,7 +417,7 @@ func TestBrowseOnAnEmptyTableSerializesRowsAsAnEmptyArray(t *testing.T) {
 func TestBrowseReportsInvalidWhenAfterHasNoSortToken(t *testing.T) {
 	h := newHarness(t)
 	seedItems(t, h.db, 3)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	_, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "items", "limit": 10,
@@ -531,7 +533,7 @@ func idsOf(pages []browsePage) []string {
 func TestBrowseCarriesNonUTF8TextAcrossJSONWithoutManglingIt(t *testing.T) {
 	h := newHarness(t)
 	seedMojibake(t, h.db)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	pages, err := pageThroughJSON(t, h, sessionID, "mojibake", "", 1)
 	if err != nil {
@@ -567,7 +569,7 @@ func TestBrowseCarriesNonUTF8TextAcrossJSONWithoutManglingIt(t *testing.T) {
 func TestBrowseOnANonUTF8SortColumnTerminatesInsteadOfPagingForever(t *testing.T) {
 	h := newHarness(t)
 	seedMojibake(t, h.db)
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	pages, err := pageThroughJSON(t, h, sessionID, "mojibake", `,"sort":[{"column":"x"}]`, 1)
 	if err == nil {
@@ -607,7 +609,7 @@ func TestBrowseRendersABlobColumnAsBytes(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 	_ = db.Close()
-	sessionID := openBrowseSession(t, h)
+	sessionID := openSession(t, h)
 
 	out, err := h.call(t, "browse.page", map[string]any{
 		"session_id": sessionID, "database": "main", "table": "photos", "limit": 10,
