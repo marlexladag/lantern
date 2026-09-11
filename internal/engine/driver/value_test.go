@@ -189,3 +189,31 @@ func TestNormalizeUnmarshalableFallsBackToSprintf(t *testing.T) {
 		t.Errorf("complex128 -> %+v, want readable text", got)
 	}
 }
+
+// Fix wave D-1. A driver hands TEXT over as a Go string — modernc.org/sqlite
+// returns every TEXT column that way — and a string in Go is bytes, not
+// characters: nothing stops a latin-1 or mojibake column from arriving here
+// as a string no UTF-8 decoder accepts. Value.Text crosses the wire as JSON,
+// and encoding/json replaces every invalid byte with U+FFFD, so such a value
+// used to arrive at the UI as a replacement character tagged "text" —
+// indistinguishable from a row that genuinely holds one, and, when it was a
+// key, a cursor that re-matched its own row forever.
+//
+// So the UTF-8 screen belongs on every path that fills Text, not only on the
+// []byte one. A string and the same bytes as a []byte must classify
+// identically: which Go type a driver happened to pick says nothing about
+// the value.
+func TestNormalizeClassifiesInvalidUTF8TheSameWhicheverTypeItArrivesAs(t *testing.T) {
+	raw := []byte{0x61, 0xff, 0xfe}
+	fromBytes := Normalize(raw)
+	fromString := Normalize(string(raw))
+	if fromBytes != fromString {
+		t.Errorf("[]byte -> %+v but string -> %+v; the same bytes classified two ways", fromBytes, fromString)
+	}
+	if fromString.Kind != ValueBytes {
+		t.Errorf("kind = %q, want %q — invalid UTF-8 cannot cross JSON as text", fromString.Kind, ValueBytes)
+	}
+	if fromString.Text != "3 bytes" {
+		t.Errorf("text = %q, want a byte-count summary", fromString.Text)
+	}
+}

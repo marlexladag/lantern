@@ -81,10 +81,12 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 		}
 		// typeof() rides along so the keyset can be judged on the value's
 		// STORAGE CLASS rather than on its column's declared type. It has to
-		// come from SQLite because it cannot be recovered afterwards: the
-		// cursor turns every []byte into a Go string on the way out (see
-		// cursor.Next), so a blob and a text value are the same thing by the
-		// time they reach driver.Normalize.
+		// come from SQLite because it cannot be recovered afterwards:
+		// driver.Normalize classifies bytes by whether they decode as UTF-8,
+		// which is the right question for a grid and the wrong one here — a
+		// blob whose bytes happen to spell text normalizes to ValueText, and
+		// binding that back compares TEXT against BLOB storage, which SQLite
+		// sorts every blob above.
 		for _, t := range order {
 			sel = append(sel, "typeof("+t.expr+")")
 		}
@@ -192,7 +194,26 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 				return nil, dberr.New(dberr.KindUnsupported,
 					"browse: a key column holds binary data")
 			}
-			keyset[i] = driver.Normalize(last[len(cols)+i])
+			v := driver.Normalize(last[len(cols)+i])
+			// The third and last screen, and the one that closes fix wave
+			// D-1. The two above read the column's declared type and the
+			// value's storage class; this one reads the VALUE, by asking the
+			// only authority on what can be bound back — keysetArg itself, so
+			// the two can never drift apart. A TEXT column holding bytes that
+			// are not UTF-8 passes both of the others and still has no cursor
+			// form: Normalize can only summarise it, and the summary bound
+			// back would match the cursor's own row rather than follow it.
+			//
+			// keysetArg's doc comment claims every cursor this driver issues
+			// is one it accepts back. This is what makes that true rather
+			// than merely intended.
+			if v.Kind != driver.ValueNull {
+				if _, err := keysetArg(v); err != nil {
+					return nil, dberr.New(dberr.KindUnsupported,
+						"browse: a key column holds a value that cannot be carried in a cursor")
+				}
+			}
+			keyset[i] = v
 		}
 		page.Keyset = keyset
 		page.SortToken = sortToken(req.Table, order)

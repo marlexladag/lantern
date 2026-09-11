@@ -1155,3 +1155,41 @@ func TestBrowseRefusesAKeysetWithNoSortToken(t *testing.T) {
 		t.Errorf("the cursor was refused with its own token: %v", err)
 	}
 }
+
+// Fix wave D-1, at the driver. A TEXT column can hold bytes that are not
+// UTF-8 — SQLite stores whatever it is handed — and such a value has no text
+// form that survives JSON, so it cannot be a cursor. The driver has to say
+// so when it ISSUES the keyset rather than hand out one that pages wrong:
+// the mangled value that comes back sorts below the raw bytes it replaced,
+// so the predicate re-matches the cursor's own row and the page repeats
+// forever while the row before it becomes unreachable.
+//
+// This is the same refusal the blob check makes one line above it, for the
+// same reason, and it must carry its own message: two causes that report the
+// same Kind and the same words are one cause as far as any test can tell.
+func TestBrowseRefusesAKeysetHoldingTextThatIsNotUTF8(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)`,
+		`INSERT INTO t (x) VALUES ('a'), (CAST(x'ff' AS TEXT)), (CAST(x'fe' AS TEXT))`)
+
+	// Limit 1 sorted on x: page 0 is 'a', and page 1's last row is the
+	// 0xfe value — the row whose keyset cannot be carried.
+	req := driver.BrowseRequest{Database: "main", Table: "t", Limit: 1, Sort: []driver.SortKey{{Column: "x"}}}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("page 0: %v", err)
+	}
+	req.After, req.SortToken = page.Keyset, page.SortToken
+
+	_, err = b.Browse(context.Background(), req)
+	if err == nil {
+		t.Fatal("a keyset holding bytes that are not UTF-8 was handed out")
+	}
+	got := dberr.From(err)
+	if got.Kind != dberr.KindUnsupported {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindUnsupported, err)
+	}
+	if strings.Contains(got.Message, "binary data") {
+		t.Errorf("message = %q, which is the BLOB refusal's words; this is a different cause", got.Message)
+	}
+}

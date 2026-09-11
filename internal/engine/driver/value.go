@@ -45,16 +45,19 @@ func Normalize(v any) Value {
 	case nil:
 		return Value{Kind: ValueNull}
 	case string:
-		return Value{Kind: ValueText, Text: t}
+		// A Go string is bytes, not characters, and a driver will hand one
+		// over for any TEXT column — modernc.org/sqlite returns every one of
+		// them as a string. Nothing obliges a TEXT column to hold UTF-8:
+		// SQLite stores whatever it was handed, so a latin-1 or mojibake
+		// column arrives here as a string no decoder accepts. Screened on
+		// exactly the same terms as []byte below; see characters.
+		return characters(t)
 	case []byte:
 		// Most driver []byte is text (MySQL in particular hands back CHAR
-		// and VARCHAR as []byte). Treat valid UTF-8 as text and anything
-		// else — a BLOB, a corrupt column — as opaque bytes the grid will
-		// not try to render inline.
-		if utf8.Valid(t) {
-			return Value{Kind: ValueText, Text: string(t)}
-		}
-		return Value{Kind: ValueBytes, Text: fmt.Sprintf("%d bytes", len(t))}
+		// and VARCHAR as []byte), so it is screened the same way a string
+		// is rather than assumed binary. The conversion copies, so nothing
+		// here keeps a reference to the driver's slice.
+		return characters(string(t))
 	case bool:
 		return Value{Kind: ValueBool, Text: strconv.FormatBool(t)}
 	case int64:
@@ -102,4 +105,28 @@ func Normalize(v any) Value {
 		return Value{Kind: ValueText, Text: string(b)}
 	}
 	return Value{Kind: ValueText, Text: fmt.Sprintf("%v", v)}
+}
+
+// characters classifies a value a driver handed over as characters —
+// whether it picked string or []byte to carry them.
+//
+// The UTF-8 screen is the load-bearing part, and it belongs HERE rather than
+// on one of the two call sites, because Text crosses the wire as JSON and
+// encoding/json has no way to carry a byte that is not valid UTF-8: it
+// substitutes U+FFFD silently. A value that reached the UI that way was
+// indistinguishable from a row genuinely holding a replacement character,
+// and — when it was a sort key — echoing the substitute back as a cursor
+// re-matched the cursor's own row, because U+FFFD sorts below the raw bytes
+// it replaced under a memcmp collation. That is fix wave D-1: one row
+// repeated forever and the row before it unreachable.
+//
+// So anything that is not valid UTF-8 is opaque bytes, summarised by length
+// and refused inline rendering by the grid, rather than text that lies about
+// itself. It is also what makes ValueBytes reachable at all for a real row
+// (D-2): a BLOB column's bytes are almost never valid UTF-8.
+func characters(s string) Value {
+	if utf8.ValidString(s) {
+		return Value{Kind: ValueText, Text: s}
+	}
+	return Value{Kind: ValueBytes, Text: fmt.Sprintf("%d bytes", len(s))}
 }

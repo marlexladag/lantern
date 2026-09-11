@@ -6,6 +6,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -282,13 +283,24 @@ func (c *cursor) Next(ctx context.Context, n int) ([]driver.Row, error) {
 		// database/sql's Scan already clones a []byte into a fresh slice
 		// before it reaches an `any` destination (see convertAssignRows), so
 		// nothing here is actually aliasing the driver's internal buffer.
-		// Convert to string anyway as defence in depth: that cloning is an
-		// unexported implementation detail of the standard library, not a
-		// documented guarantee this code should rely on, and every other
-		// driver this cursor might wrap someday may not behave the same way.
+		// Clone anyway as defence in depth: that cloning is an unexported
+		// implementation detail of the standard library, not a documented
+		// guarantee this code should rely on, and every other driver this
+		// cursor might wrap someday may not behave the same way. Next
+		// accumulates a whole page before returning it, so a driver that
+		// reused one row buffer would leave every earlier row reading back
+		// as the last one.
+		//
+		// A CLONE, not the string() conversion this used to do. The
+		// conversion copied too, so it was safe — but it also erased the
+		// distinction driver.Normalize classifies on, leaving its []byte
+		// case dead for the only shipped driver: a BLOB arrived as text
+		// full of control characters and ValueBytes was unreachable for a
+		// real row (fix wave D-2). Deciding what a value IS belongs in
+		// Normalize, once, not in each driver's cursor.
 		for i, v := range cells {
 			if b, ok := v.([]byte); ok {
-				cells[i] = string(b)
+				cells[i] = bytes.Clone(b)
 			}
 		}
 		out = append(out, driver.Row(cells))

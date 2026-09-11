@@ -429,3 +429,201 @@ func TestBrowseReportsInvalidWhenAfterHasNoSortToken(t *testing.T) {
 		t.Errorf("kind = %q, want %q", kind, dberr.KindInvalid)
 	}
 }
+
+// -- fix wave D-1/D-2: values that only break in transit ------------------
+//
+// Everything above this line pages Go values. That is exactly the gap D-1
+// lived in: a driver-level page walk over the same tables is correct, and
+// the corruption appears only once the keyset has been through
+// encoding/json and back. These tests page the WIRE, splicing the literal
+// bytes the server wrote into the next request, the same technique
+// TestBrowseSortTokenRoundTripsThroughRawJSON uses for sort_token.
+
+// maxJSONPages bounds pageThroughJSON. A keyset that fails to advance
+// repeats its page forever; a test that hangs reports nothing.
+const maxJSONPages = 20
+
+// seedMojibake creates fix wave D-1's confirmed repro table verbatim: a
+// TEXT column holding bytes no UTF-8 decoder accepts. Not exotic — this is
+// any SQLite file written by a latin-1 application, and CAST(x'..' AS TEXT)
+// is the one-line constructor for it.
+func seedMojibake(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("seedMojibake: open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE mojibake (id INTEGER PRIMARY KEY, x TEXT)`); err != nil {
+		t.Fatalf("seedMojibake: ddl: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO mojibake (x) VALUES ('a'), (CAST(x'ff' AS TEXT)), (CAST(x'fe' AS TEXT))`,
+	); err != nil {
+		t.Fatalf("seedMojibake: insert: %v", err)
+	}
+}
+
+// pageThroughJSON pages a table to termination the way the shell does:
+// every continuation is built by splicing the literal keyset, sort_token
+// and offset bytes the server just wrote into the next request, so each
+// cursor value makes the full JSON round trip. It returns the pages it
+// collected and whatever error ended the walk, and fails the test outright
+// if the walk does not terminate.
+func pageThroughJSON(t *testing.T, h *harness, sessionID, table, sortJSON string, limit int) ([]browsePage, error) {
+	t.Helper()
+	handler, ok := h.srv.Handler("browse.page")
+	if !ok {
+		t.Fatal("browse.page is not registered")
+	}
+
+	var pages []browsePage
+	cont := ""
+	for i := 0; ; i++ {
+		if i > maxJSONPages {
+			t.Fatalf("pagination did not terminate after %d pages", i)
+		}
+		req := fmt.Sprintf(`{"session_id":%q,"database":"main","table":%q,"limit":%d%s%s}`,
+			sessionID, table, limit, sortJSON, cont)
+		res, err := handler(context.Background(), json.RawMessage(req))
+		if err != nil {
+			return pages, err
+		}
+		raw, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("marshal page %d: %v", i, err)
+		}
+		var page browsePage
+		if err := json.Unmarshal(raw, &page); err != nil {
+			t.Fatalf("decode page %d: %v", i, err)
+		}
+		pages = append(pages, page)
+		if page.Exhausted {
+			return pages, nil
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatalf("decode page %d as raw fields: %v", i, err)
+		}
+		cont = `,"offset":` + string(fields["offset"])
+		if keyset, ok := fields["keyset"]; ok {
+			cont += `,"after":` + string(keyset) + `,"sort_token":` + string(fields["sort_token"])
+		}
+	}
+}
+
+// idsOf collects the first column of every row of every page, in order.
+func idsOf(pages []browsePage) []string {
+	var ids []string
+	for _, page := range pages {
+		for _, row := range page.Rows {
+			ids = append(ids, row[0].Text)
+		}
+	}
+	return ids
+}
+
+// D-1's data half. The keyset here is the id, so paging is never at risk —
+// what is at risk is the VALUE: a TEXT cell holding bytes that are not
+// UTF-8 cannot cross encoding/json as text, and used to arrive as the
+// Unicode replacement character with kind "text", indistinguishable from a
+// row that genuinely contains one.
+func TestBrowseCarriesNonUTF8TextAcrossJSONWithoutManglingIt(t *testing.T) {
+	h := newHarness(t)
+	seedMojibake(t, h.db)
+	sessionID := openBrowseSession(t, h)
+
+	pages, err := pageThroughJSON(t, h, sessionID, "mojibake", "", 1)
+	if err != nil {
+		t.Fatalf("paging by the default sort: %v", err)
+	}
+	if got := idsOf(pages); len(got) != 3 || got[0] != "1" || got[1] != "2" || got[2] != "3" {
+		t.Fatalf("ids = %v, want [1 2 3] exactly once each", got)
+	}
+	for i, want := range []struct{ kind, text string }{
+		{"text", "a"},
+		{"bytes", "1 bytes"},
+		{"bytes", "1 bytes"},
+	} {
+		cell := pages[i].Rows[0][1]
+		if cell.Kind != want.kind || cell.Text != want.text {
+			t.Errorf("row %d x = %+v, want {kind:%s text:%s}", i+1, cell, want.kind, want.text)
+		}
+		if strings.ContainsRune(cell.Text, '�') {
+			t.Errorf("row %d x came back as the replacement character: %q", i+1, cell.Text)
+		}
+	}
+}
+
+// D-1's paging half, and the exact repro from the brief: the same table
+// sorted on the non-UTF-8 column, one row at a time, over the wire. The
+// replacement character sorts BELOW the raw bytes it replaced under
+// SQLite's memcmp collation, so the mangled cursor used to re-match its own
+// row and serve it forever while the row before it became unreachable.
+//
+// Terminating with a clear error is the accepted outcome (see the report):
+// the value genuinely cannot be carried in a cursor, and saying so beats
+// both the silent loop and a silently wrong page.
+func TestBrowseOnANonUTF8SortColumnTerminatesInsteadOfPagingForever(t *testing.T) {
+	h := newHarness(t)
+	seedMojibake(t, h.db)
+	sessionID := openBrowseSession(t, h)
+
+	pages, err := pageThroughJSON(t, h, sessionID, "mojibake", `,"sort":[{"column":"x"}]`, 1)
+	if err == nil {
+		// The other acceptable ending: it paged the whole table cleanly.
+		if got := idsOf(pages); len(got) != 3 {
+			t.Fatalf("paging finished but returned %v, want every row exactly once", got)
+		}
+		return
+	}
+	seen := map[string]int{}
+	for _, id := range idsOf(pages) {
+		seen[id]++
+		if seen[id] > 1 {
+			t.Errorf("id %s was served %d times before the walk ended: %v", id, seen[id], idsOf(pages))
+		}
+	}
+}
+
+// D-2. ValueBytes had never been produced by a real row: the cursor turned
+// every []byte into a string before Normalize could classify it, so a BLOB
+// arrived as text full of control characters and ResultGrid's `case 'bytes'`
+// was unreachable in production. A real browse of a real BLOB column is the
+// only test that can say otherwise.
+func TestBrowseRendersABlobColumnAsBytes(t *testing.T) {
+	h := newHarness(t)
+	db, err := sql.Open("sqlite", h.db)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE photos (id INTEGER PRIMARY KEY, data BLOB)`); err != nil {
+		t.Fatalf("ddl: %v", err)
+	}
+	// A real JPEG's opening bytes: not valid UTF-8, which is what tells an
+	// opaque blob from the CHAR/VARCHAR a networked driver also hands back
+	// as []byte.
+	if _, err := db.Exec(`INSERT INTO photos (id, data) VALUES (1, x'FFD8FFE000')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	_ = db.Close()
+	sessionID := openBrowseSession(t, h)
+
+	out, err := h.call(t, "browse.page", map[string]any{
+		"session_id": sessionID, "database": "main", "table": "photos", "limit": 10,
+	})
+	if err != nil {
+		t.Fatalf("browse.page: %v", err)
+	}
+	var page browsePage
+	if err := json.Unmarshal(out, &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(page.Rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(page.Rows))
+	}
+	cell := page.Rows[0][1]
+	if cell.Kind != "bytes" || cell.Text != "5 bytes" {
+		t.Errorf("blob cell = %+v, want {kind:bytes text:5 bytes}", cell)
+	}
+}

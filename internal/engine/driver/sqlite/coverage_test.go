@@ -186,16 +186,21 @@ func TestNextReportsAScanErrorOnDestinationCountMismatch(t *testing.T) {
 }
 
 // modernc.org/sqlite returns TEXT columns as Go strings already (see the
-// email assertion in TestQueryStreamsRowsAndReportsColumns), so the
-// byte-slice-to-string copy in Next is only exercised by a genuine BLOB
-// column. Two distinct rows in the same Next call double as a regression
-// guard for that copy: database/sql's Scan already clones a []byte before
-// it reaches Next's `any` destination (see convertAssignRows), so nothing
-// here is working around a live aliasing bug today — but if the string()
-// conversion in Next were ever replaced with something that aliases instead
-// of copying, a shared buffer would show up here as both rows reading back
-// with the second row's content.
-func TestNextCopiesBlobValuesIntoDistinctStrings(t *testing.T) {
+// email assertion in TestQueryStreamsRowsAndReportsColumns), so the []byte
+// clone in Next is only exercised by a genuine BLOB column. Two distinct
+// rows in the same Next call are the regression guard for that clone:
+// database/sql's Scan already clones a []byte before it reaches Next's
+// `any` destination (see convertAssignRows), so nothing here is working
+// around a live aliasing bug today — but Next accumulates a whole page
+// before returning it, so if the clone were dropped and some future driver
+// reused one row buffer, a shared buffer would show up here as both rows
+// reading back with the second row's content.
+//
+// The values arrive as []byte and must STAY []byte: converting them to
+// string here is what made driver.Normalize's []byte case dead for the only
+// shipped driver, so a BLOB rendered as control characters instead of the
+// byte summary the grid refuses to render inline (fix wave D-2).
+func TestNextCopiesBlobValuesIntoDistinctSlices(t *testing.T) {
 	path := fixture(t)
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -224,15 +229,15 @@ func TestNextCopiesBlobValuesIntoDistinctStrings(t *testing.T) {
 		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
 	}
 
-	first, ok := rows[0][0].(string)
+	first, ok := rows[0][0].([]byte)
 	if !ok {
-		t.Fatalf("row 0 = %T, want string", rows[0][0])
+		t.Fatalf("row 0 = %T, want []byte — a blob must reach Normalize as bytes", rows[0][0])
 	}
-	second, ok := rows[1][0].(string)
+	second, ok := rows[1][0].([]byte)
 	if !ok {
-		t.Fatalf("row 1 = %T, want string", rows[1][0])
+		t.Fatalf("row 1 = %T, want []byte — a blob must reach Normalize as bytes", rows[1][0])
 	}
-	if first != "first" || second != "second" {
+	if string(first) != "first" || string(second) != "second" {
 		t.Errorf(`got %q, %q, want "first", "second" -- a shared buffer would corrupt earlier rows`, first, second)
 	}
 }
