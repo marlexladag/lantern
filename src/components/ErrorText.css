@@ -15,6 +15,14 @@
   word-break: break-word;
 }
 
+/*
+ * The actionable half, for the Kinds that have one (see KIND_HINTS): what the
+ * user does next, secondary to the engine's account of what happened.
+ */
+.error-text-hint {
+  color: var(--color-dim);
+}
+
 .error-text-native {
   font-size: var(--text-label);
 }

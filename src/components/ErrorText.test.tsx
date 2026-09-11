@@ -63,3 +63,42 @@ it('is not itself an alert', () => {
 
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
+
+/*
+ * Spec §11 says the UI branches on Kind. This is the first branch that is not
+ * `canceled`, and both halves of it live here on purpose: a hint that renders
+ * for every Kind is not a branch, it is unconditional text that happens to be
+ * right once.
+ */
+it('tells a read_only failure what to do about it, without replacing the engine message', () => {
+  render(
+    <ErrorText
+      description={{
+        kind: 'read_only',
+        message: 'the connection is read-only',
+        native: 'attempt to write a readonly database',
+      }}
+    />,
+  );
+
+  // The engine still says what happened...
+  expect(screen.getByText('the connection is read-only')).toBeDefined();
+  // ...and the UI says what to do next: one toggle, named exactly as the
+  // dialog names it.
+  expect(screen.getByText(/production connection/i)).toBeDefined();
+});
+
+it('offers no hint for a constraint failure, whose fix is the data, not the connection', () => {
+  render(
+    <ErrorText
+      description={{
+        kind: 'constraint',
+        message: 'the database reported an error',
+        native: 'UNIQUE constraint failed: users.email',
+      }}
+    />,
+  );
+
+  expect(screen.getByText('the database reported an error')).toBeDefined();
+  expect(screen.queryByText(/production connection/i)).toBeNull();
+});
