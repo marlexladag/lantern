@@ -622,17 +622,33 @@ func TestBrowseOnAWithoutRowidTableKeysetsOnThePrimaryKey(t *testing.T) {
 
 // The same table sorted by a column that is not part of the key: the whole
 // key has to be appended, not just the part of it the sort happens to name.
+//
+// EVERY page size from 1 to 6, because the property only becomes observable
+// when a page boundary falls INSIDE a tie group. This fixture ties in groups
+// of two, so at limit 4 — the only size this test used to run — every
+// boundary lands cleanly between groups, and deleting the appended key
+// changes nothing: a mutation run removed the tiebreaker and left all
+// packages green while coverage still read 100%. Limits 3 and 5 each lose a
+// row without it, and limit 1 loses three. A test that names a property has
+// to run the inputs that can see it; this one named it and did not.
 func TestBrowseOnAWithoutRowidTableAppendsTheKeyToACallerSort(t *testing.T) {
-	b := browseOn(t,
-		`CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a,b)) WITHOUT ROWID`,
-		`INSERT INTO pairs VALUES ('x','1','same'),('x','2','same'),('y','1','same'),
-		 ('y','2','same'),('z','1','same'),('z','2','same')`)
+	for limit := 1; limit <= 6; limit++ {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			b := browseOn(t,
+				`CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a,b)) WITHOUT ROWID`,
+				`INSERT INTO pairs VALUES ('x','1','same'),('x','2','same'),('y','1','same'),
+				 ('y','2','same'),('z','1','same'),('z','2','same')`)
 
-	rows := pageAll(t, b, driver.BrowseRequest{
-		Database: "main", Table: "pairs", Limit: 4,
-		Sort: []driver.SortKey{{Column: "note"}, {Column: "a"}},
-	})
-	wantOrder(t, texts(rows, 1), []string{"1", "2", "1", "2", "1", "2"})
+			rows := pageAll(t, b, driver.BrowseRequest{
+				Database: "main", Table: "pairs", Limit: limit,
+				Sort: []driver.SortKey{{Column: "note"}, {Column: "a"}},
+			})
+			// Both key columns: `a` alone cannot tell the two rows of a tie
+			// group apart, which is the whole reason `b` has to be appended.
+			wantOrder(t, texts(rows, 0), []string{"x", "x", "y", "y", "z", "z"})
+			wantOrder(t, texts(rows, 1), []string{"1", "2", "1", "2", "1", "2"})
+		})
+	}
 }
 
 // A view has neither a rowid nor a key, so nothing can make its ordering
@@ -752,17 +768,53 @@ func TestBrowseRejectsAnUnknownSortColumn(t *testing.T) {
 // A Keyset is opaque, but it is not unvalidated: a cursor of the wrong width
 // cannot be matched against the sort it was supposedly taken from, and
 // guessing would silently serve a page from the wrong place.
+//
+// THE GUARD IS LOAD-BEARING, not tidiness. keysetPredicate indexes After
+// once per order term; a cursor narrower than the sort panics it with
+// "index out of range [1] with length 1", and the engine's dispatch
+// goroutine goes down with it. The token is a sha256 over public data —
+// table name, resolved order — so it is freely recomputable by anyone who
+// can send a request, which makes a crafted short cursor with a genuine
+// token reachable rather than theoretical. Confirmed by deleting the check
+// and running exactly this request.
+//
+// The cursor therefore carries a REAL token, taken from a real first page
+// under this same sort. The version before this one sent no token at all,
+// so the missing-token check caught it first and the width check was never
+// reached — and because both report KindInvalid, the assertion could not
+// tell which one had fired. That is this project's recurring defect, "a
+// Kind check alone is not an assertion when two causes produce the same
+// Kind", reintroduced in the very diff that recorded learning it. So the
+// message is pinned too.
 func TestBrowseRejectsACursorOfTheWrongWidth(t *testing.T) {
 	b := browser(t, browseFixture(t, 5))
-	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+	first, err := b.Browse(context.Background(), driver.BrowseRequest{
 		Database: "main", Table: "users", Limit: 2,
-		After: []driver.Value{{Kind: driver.ValueInt, Text: "1"}},
+	})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if len(first.Keyset) != 2 || first.SortToken == "" {
+		t.Fatalf("users' default sort should resolve to [id, rowid]; got keyset %+v token %q",
+			first.Keyset, first.SortToken)
+	}
+
+	_, err = b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		// One value short of the sort's width, with the token that sort
+		// really did issue: the width check is now the only thing that can
+		// refuse this, and without it this call panics.
+		After: first.Keyset[:1], SortToken: first.SortToken,
 	})
 	if err == nil {
 		t.Fatal("a cursor narrower than the sort was accepted")
 	}
-	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+	got := dberr.From(err)
+	if got.Kind != dberr.KindInvalid {
 		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+	if !strings.Contains(got.Message, "does not match the sort") {
+		t.Errorf("message = %q, want the width refusal — a token check reports the same Kind", got.Message)
 	}
 }
 
@@ -1143,8 +1195,34 @@ func TestBrowseRefusesAKeysetWithNoSortToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("a keyset with no sort token was accepted")
 	}
-	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
-		t.Errorf("kind = %q, want invalid", got.Kind)
+	missing := dberr.From(err)
+	if missing.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want invalid", missing.Kind)
+	}
+
+	// The Kind is not the assertion. Deleting the empty-token check leaves
+	// the hash comparison below it to catch this same request — "" never
+	// equals a real token — reporting the identical Kind, so a mutation run
+	// removed the check and the whole suite stayed green. What distinguishes
+	// the two is what the caller is TOLD: a cursor that arrived without its
+	// token is a caller that dropped a field, while a cursor whose token no
+	// longer matches is a sort that changed under it. Those are different
+	// problems, so they must be different messages, and this is what keeps
+	// them so.
+	_, err = b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		After: first.Keyset, SortToken: "a-token-from-some-other-sort",
+	})
+	if err == nil {
+		t.Fatal("a keyset with a mismatched sort token was accepted")
+	}
+	mismatch := dberr.From(err)
+	if missing.Message == mismatch.Message {
+		t.Errorf("a missing token and a mismatched one report the same message %q; "+
+			"the empty-token check is then indistinguishable from its absence", missing.Message)
+	}
+	if !strings.Contains(missing.Message, "missing") {
+		t.Errorf("the missing-token message %q does not say the token is missing", missing.Message)
 	}
 	// The same keyset WITH its token still works — a check that refused
 	// legitimate continuations would be worse than the bug it closes.
