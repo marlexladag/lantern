@@ -36,6 +36,7 @@ is the plumbing that everything else will sit on:
 | `src-tauri/src/engine.rs` | Sidecar lifecycle, ID correlation, respawn backoff |
 | `src/lib/engine.ts` | Typed client for the shell's `engine_request` command |
 | `scripts/` | Sidecar cross-compilation and its tests, plus the CI validator |
+| `scripts/harness/` | The browser harness — the real bundle under the real CSP against a real sidecar, driven by headless Chrome (see below) |
 
 ## Prerequisites
 
@@ -88,6 +89,45 @@ Rust checks mirror what CI runs:
 ```sh
 cd src-tauri && cargo fmt --check && cargo clippy -- -D warnings && cargo test
 ```
+
+## Browser harness
+
+```sh
+node scripts/harness/run.mjs                  # build, serve, drive, report
+node scripts/harness/run.mjs --db ~/my.db     # against your own database
+node scripts/harness/run.mjs --no-build --keep --out ./shots
+```
+
+Serves the production `dist/` under the **exact** `csp` string read out of
+`src-tauri/tauri.conf.json`, proxies the UI's `engine_request` calls to a real
+Go sidecar over its real JSON-RPC stdio, and drives the page with headless
+Chrome: clicking, typing, screenshotting, reading pixels back off the grid's
+canvas and names out of the accessibility tree. With no `--db` it builds a
+fixture with the shapes that have broken something before — NULLs in a text
+column, a table with zero rows, a view, and enough rows to scroll.
+
+**What it is for.** Nothing in `npm test` paints or lays out. jsdom performs
+no layout, so a grid that renders with zero height, a canvas that never draws,
+and a cell that says `NULL` on screen while reading empty to a screen reader
+all pass a green suite. Each of those was a real defect here, and each was
+found this way.
+
+**What it cannot tell you.** The webview here is Chromium and the one that
+ships is WKWebView, so a clean run is evidence, not proof. Two checks in
+particular cannot be made from here and have to be made by hand in the
+packaged app:
+
+1. **CSP reports in the shipping webview.** Tauri attaches the policy in its
+   `tauri://localhost` asset handler, where `'self'` resolves to a custom
+   scheme origin rather than this harness's `http://127.0.0.1` one. Build the
+   app, open the Web Inspector, and watch the console while using it.
+2. **Cmd-C on a grid cell.** The clipboard needs a secure context and a real
+   user gesture; a synthesised key event in a loopback HTTP page has neither.
+
+It is **not part of any gate**: it needs a browser that may not be installed,
+so `npm test` and CI never call it. A missing browser exits 2 with a message
+saying so (set `LANTERN_HARNESS_CHROME` to point at your own); a failed check
+exits 1.
 
 ## Running the engine directly
 
