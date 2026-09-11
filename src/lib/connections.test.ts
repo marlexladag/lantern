@@ -87,4 +87,23 @@ describe('asDbError', () => {
   it('returns null when data is present but not shaped like a DbError', () => {
     expect(asDbError({ code: -32020, message: 'x', data: { nope: true } })).toBeNull();
   });
+
+  // `native` and `query` are rendered straight into the UI, so they get the
+  // same typeof check `kind` and `message` already have. Absent is fine;
+  // present-and-not-a-string is not.
+  it('returns null when native or query is present but is not a string', () => {
+    const base = { kind: 'unknown', message: 'boom' };
+    expect(asDbError({ code: -32020, message: 'x', data: { ...base, native: 42 } })).toBeNull();
+    expect(asDbError({ code: -32020, message: 'x', data: { ...base, query: { sql: 'SELECT 1' } } })).toBeNull();
+  });
+
+  it('accepts a database error carrying both native and query as strings', () => {
+    const got = asDbError({
+      code: -32020,
+      message: 'x',
+      data: { kind: 'syntax', message: 'the database reported an error', native: 'near "SELCT"', query: 'SELCT 1' },
+    });
+    expect(got?.native).toBe('near "SELCT"');
+    expect(got?.query).toBe('SELCT 1');
+  });
 });

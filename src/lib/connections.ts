@@ -87,6 +87,11 @@ export function asDbError(err: unknown): DbError | null {
   if (e.code !== CODE_DATABASE) return null;
   const d = e.data as Partial<DbError> | undefined;
   if (!d || typeof d.kind !== 'string' || typeof d.message !== 'string') return null;
+  // `native` and `query` are optional on the wire, so "absent" is valid — but
+  // present-and-not-a-string is the same untrusted payload `kind` and
+  // `message` are checked for, and the UI renders both of these directly.
+  if (d.native !== undefined && typeof d.native !== 'string') return null;
+  if (d.query !== undefined && typeof d.query !== 'string') return null;
   return d as DbError;
 }
 

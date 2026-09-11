@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
-  asDbError,
   closeSession,
   listConnections,
   loadColumns,
@@ -10,6 +9,7 @@ import {
   type Connection,
   type Table,
 } from '../lib/connections';
+import { describeError, type ErrorDescription } from '../lib/errors';
 import './Sidebar.css';
 
 /**
@@ -31,14 +31,14 @@ export const CONNECTIONS_CHANGED_EVENT = 'lantern:connections-changed';
 type SessionState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'error'; message: string }
+  | { status: 'error'; error: ErrorDescription }
   | { status: 'open'; sessionId: string; catalog: Catalog; expanded: boolean };
 
 interface TableUiState {
   expanded: boolean;
   loading: boolean;
   columns?: Column[];
-  error?: string;
+  error?: ErrorDescription;
 }
 
 function tableKey(connectionId: string, databaseName: string, tableName: string) {
@@ -68,7 +68,7 @@ function LockIcon() {
 export function Sidebar() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<ErrorDescription | null>(null);
   const [sessions, setSessions] = useState<Record<string, SessionState>>({});
   const [tables, setTables] = useState<Record<string, TableUiState>>({});
   const [activeRowId, setActiveRowId] = useState<string | null>(null);
@@ -86,10 +86,10 @@ export function Sidebar() {
       setConnections(list);
       setListError(null);
     } catch (err) {
-      const dbErr = asDbError(err);
+      const described = describeError(err);
       // A canceled request is not a failure to report (spec §11).
-      if (dbErr?.kind !== 'canceled') {
-        setListError(dbErr?.message ?? String(err));
+      if (described.kind !== 'canceled') {
+        setListError(described);
       }
     } finally {
       setLoaded(true);
@@ -186,14 +186,14 @@ export function Sidebar() {
         }));
       })
       .catch((err) => {
-        const dbErr = asDbError(err);
-        if (dbErr?.kind === 'canceled') {
+        const described = describeError(err);
+        if (described.kind === 'canceled') {
           setSessions((prev) => ({ ...prev, [connection.id]: { status: 'idle' } }));
           return;
         }
         setSessions((prev) => ({
           ...prev,
-          [connection.id]: { status: 'error', message: dbErr?.message ?? String(err) },
+          [connection.id]: { status: 'error', error: described },
         }));
       });
   }
@@ -218,14 +218,14 @@ export function Sidebar() {
         setTables((prev) => ({ ...prev, [key]: { expanded: true, loading: false, columns } }));
       })
       .catch((err) => {
-        const dbErr = asDbError(err);
-        if (dbErr?.kind === 'canceled') {
+        const described = describeError(err);
+        if (described.kind === 'canceled') {
           setTables((prev) => ({ ...prev, [key]: { expanded: false, loading: false } }));
           return;
         }
         setTables((prev) => ({
           ...prev,
-          [key]: { expanded: true, loading: false, error: dbErr?.message ?? String(err) },
+          [key]: { expanded: true, loading: false, error: described },
         }));
       });
   }
@@ -280,9 +280,9 @@ export function Sidebar() {
     <div className="sidebar">
       <div className="sidebar-section">Connections</div>
       {listError && (
-        <p role="alert" className="sidebar-error">
-          {listError}
-        </p>
+        <div role="alert" className="sidebar-error">
+          {listError.message}
+        </div>
       )}
       {connections.length === 0 ? (
         <div className="sidebar-empty">
@@ -322,9 +322,9 @@ export function Sidebar() {
                 </div>
                 {session?.status === 'loading' && <div className="sidebar-status">Opening…</div>}
                 {session?.status === 'error' && (
-                  <p role="alert" className="sidebar-error">
-                    {session.message}
-                  </p>
+                  <div role="alert" className="sidebar-error">
+                    {session.error.message}
+                  </div>
                 )}
                 {isOpen &&
                   session.status === 'open' &&
@@ -351,9 +351,9 @@ export function Sidebar() {
                           </div>
                           {ui?.loading && <div className="sidebar-status">Loading columns…</div>}
                           {ui?.error && (
-                            <p role="alert" className="sidebar-error">
-                              {ui.error}
-                            </p>
+                            <div role="alert" className="sidebar-error">
+                              {ui.error.message}
+                            </div>
                           )}
                           {ui?.expanded &&
                             ui.columns?.map((column) => (

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { asDbError, saveConnection, testConnection, type Connection, type NewConnection } from '../lib/connections';
+import { saveConnection, testConnection, type Connection, type NewConnection } from '../lib/connections';
+import { describeError, type ErrorDescription } from '../lib/errors';
 import './ConnectionDialog.css';
 
 export interface ConnectionDialogProps {
@@ -32,7 +33,7 @@ const DRIVER = 'sqlite' as const;
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-type TestStatus = { kind: 'ok' } | { kind: 'error'; message: string } | null;
+type TestStatus = { kind: 'ok' } | { kind: 'error'; error: ErrorDescription } | null;
 
 export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogProps) {
   const [name, setName] = useState('');
@@ -41,7 +42,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   const [production, setProduction] = useState(false);
   const [testStatus, setTestStatus] = useState<TestStatus>(null);
   const [testing, setTesting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<ErrorDescription | null>(null);
   const [saving, setSaving] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -120,7 +121,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     // be unreachable dead code.
     const missing = missingDriverField();
     if (missing) {
-      setFormError(`${missing} is required`);
+      setFormError({ message: `${missing} is required` });
       setTestStatus(null);
       return;
     }
@@ -132,11 +133,13 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
       if (result.ok) {
         setTestStatus({ kind: 'ok' });
       } else {
-        setTestStatus({ kind: 'error', message: result.error ?? 'Connection failed' });
+        // A reachability verdict, not a rejection: the engine answered, so
+        // there is no `native` to disclose — but it does classify the
+        // failure, and that Kind is what the hint branches on.
+        setTestStatus({ kind: 'error', error: { message: result.error ?? 'Connection failed', kind: result.kind } });
       }
     } catch (err) {
-      const dbErr = asDbError(err);
-      setTestStatus({ kind: 'error', message: dbErr?.message ?? String(err) });
+      setTestStatus({ kind: 'error', error: describeError(err) });
     } finally {
       setTesting(false);
     }
@@ -149,12 +152,12 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     if (saving) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
-      setFormError('Name is required');
+      setFormError({ message: 'Name is required' });
       return;
     }
     const missing = missingDriverField();
     if (missing) {
-      setFormError(`${missing} is required`);
+      setFormError({ message: `${missing} is required` });
       return;
     }
     setFormError(null);
@@ -163,8 +166,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
       const stored = await saveConnection(buildConnection(), '');
       onSaved(stored);
     } catch (err) {
-      const dbErr = asDbError(err);
-      setFormError(dbErr?.message ?? String(err));
+      setFormError(describeError(err));
     } finally {
       setSaving(false);
     }
@@ -249,7 +251,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               onChange={(e) => setName(e.target.value)}
               placeholder="local"
               aria-required="true"
-              aria-invalid={formError === 'Name is required' ? 'true' : undefined}
+              aria-invalid={formError?.message === 'Name is required' ? 'true' : undefined}
             />
           </div>
 
@@ -265,7 +267,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               onChange={(e) => setFile(e.target.value)}
               placeholder="/path/to/database.db"
               aria-required="true"
-              aria-invalid={formError === 'File is required' ? 'true' : undefined}
+              aria-invalid={formError?.message === 'File is required' ? 'true' : undefined}
             />
           </div>
 
@@ -322,9 +324,9 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
           </div>
 
           {formError && (
-            <p role="alert" className="field-error">
-              {formError}
-            </p>
+            <div role="alert" className="field-error">
+              {formError.message}
+            </div>
           )}
         </div>
 
@@ -339,10 +341,10 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
             </span>
           )}
           {testStatus?.kind === 'error' && (
-            <span className="test-result error">
+            <div className="test-result error">
               <span className="result-dot" />
-              {testStatus.message}
-            </span>
+              {testStatus.error.message}
+            </div>
           )}
           <span className="spacer" />
           <button type="button" className="btn" onClick={onClose}>

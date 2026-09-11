@@ -398,21 +398,34 @@ it('does not start a second columns fetch for a table while the first is still i
   expect(columnsMock).toHaveBeenCalledTimes(1);
 });
 
-it('falls back to String(err) when session.open rejects with something that is not a db error', async () => {
+// The three non-database rejections below use the shape `request()` can
+// actually produce: an OBJECT (the engine's own EngineError, or the NoIpc
+// literal), never a bare string. A string fixture passes whether or not the
+// code handles the real shape — which is exactly how every one of these
+// surfaces came to render `[object Object]` in production.
+const ENGINE_DIED = { code: -32002, message: 'the engine died' };
+const NO_IPC = {
+  code: -32006,
+  message: 'Lantern must be opened as the desktop app — this page has no connection to the engine in a browser tab.',
+};
+
+it('renders the engine message when session.open rejects with a non-database engine error', async () => {
   listMock.mockResolvedValue([conn]);
-  openMock.mockRejectedValue('the sidecar vanished');
+  openMock.mockRejectedValue(ENGINE_DIED);
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
   await act(async () => { screen.getByText('local').click(); });
 
-  await waitFor(() => expect(screen.getByText(/the sidecar vanished/i)).toBeDefined());
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toBe('the engine died');
+  expect(alert.textContent).not.toContain('[object');
 });
 
-it('falls back to String(err) when loadColumns rejects with something that is not a db error', async () => {
+it('renders the engine message when loadColumns rejects with a non-database engine error', async () => {
   listMock.mockResolvedValue([conn]);
   openMock.mockResolvedValue(openResult);
-  columnsMock.mockRejectedValue('the sidecar vanished');
+  columnsMock.mockRejectedValue(ENGINE_DIED);
 
   render(<Sidebar />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
@@ -420,13 +433,30 @@ it('falls back to String(err) when loadColumns rejects with something that is no
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   await act(async () => { screen.getByText('users').click(); });
 
-  await waitFor(() => expect(screen.getByText(/the sidecar vanished/i)).toBeDefined());
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toBe('the engine died');
+  expect(alert.textContent).not.toContain('[object');
 });
 
-it('falls back to String(err) when listConnections rejects with something that is not a db error', async () => {
-  listMock.mockRejectedValue('the sidecar vanished');
+it('renders the engine message when listConnections rejects with a non-database engine error', async () => {
+  listMock.mockRejectedValue(ENGINE_DIED);
   render(<Sidebar />);
-  await waitFor(() => expect(screen.getByText(/the sidecar vanished/i)).toBeDefined());
+
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toBe('the engine died');
+  expect(alert.textContent).not.toContain('[object');
+});
+
+// The other object request() throws: the literal it raises before invoke()
+// when there is no Tauri bridge at all. Its whole point is a message a
+// person can act on, which `String(err)` destroyed.
+it('renders the no-IPC-bridge message rather than [object Object]', async () => {
+  listMock.mockRejectedValue(NO_IPC);
+  render(<Sidebar />);
+
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toMatch(/must be opened as the desktop app/);
+  expect(alert.textContent).not.toContain('[object');
 });
 
 it('swallows a rejection from closeSession on unmount instead of crashing', async () => {

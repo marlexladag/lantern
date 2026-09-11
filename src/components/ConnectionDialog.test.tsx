@@ -260,16 +260,41 @@ it('reports an engine-level rejection from Test Connection using the db error me
   await waitFor(() => expect(screen.getByText(/the engine went sideways/i)).toBeDefined());
 });
 
-// A rejection that is not a recognizable DbError (a bare shell failure) still
-// has to render something instead of throwing.
-it('falls back to String(err) for a Test Connection rejection with no db error shape', async () => {
-  testMock.mockRejectedValue('the sidecar vanished');
+// A rejection that is not a recognizable DbError still has to render
+// something a person can read. The fixture is an OBJECT because that is the
+// only thing `request()` can reject with — the engine's own EngineError, or
+// the NoIpc literal. A bare-string fixture passes whether or not the code
+// handles the real shape, which is how `String(err)` came to render
+// `[object Object]` for every shell failure in production.
+const ENGINE_DIED = { code: -32002, message: 'the engine died' };
+const NO_IPC = {
+  code: -32006,
+  message: 'Lantern must be opened as the desktop app — this page has no connection to the engine in a browser tab.',
+};
+
+it('renders the engine message for a Test Connection rejection that is not a database error', async () => {
+  testMock.mockRejectedValue(ENGINE_DIED);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
   fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
-  await waitFor(() => expect(screen.getByText(/the sidecar vanished/i)).toBeDefined());
+  const result = await screen.findByText(/the engine died/);
+  expect(result.textContent).not.toContain('[object');
+});
+
+// The other object request() throws: the literal it raises before invoke()
+// when there is no Tauri bridge at all. Its whole point is a message a
+// person can act on, which `String(err)` destroyed.
+it('renders the no-IPC-bridge message from Test Connection rather than [object Object]', async () => {
+  testMock.mockRejectedValue(NO_IPC);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  fill('local', '/tmp/a.db');
+
+  await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
+
+  const result = await screen.findByText(/must be opened as the desktop app/);
+  expect(result.textContent).not.toContain('[object');
 });
 
 it('disables Test Connection while a test is in flight', async () => {
@@ -338,14 +363,26 @@ it('reports a failed save using the db error message and does not call onSaved',
   expect(onSaved).not.toHaveBeenCalled();
 });
 
-it('falls back to String(err) for a save rejection with no db error shape', async () => {
-  saveMock.mockRejectedValue('the sidecar vanished');
+it('renders the engine message for a save rejection that is not a database error', async () => {
+  saveMock.mockRejectedValue(ENGINE_DIED);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
   fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
-  await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/the sidecar vanished/i));
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('the engine died'));
+  expect(screen.getByRole('alert').textContent).not.toContain('[object');
+});
+
+it('renders the no-IPC-bridge message from a save rather than [object Object]', async () => {
+  saveMock.mockRejectedValue(NO_IPC);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  fill('local', '/tmp/a.db');
+
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/must be opened as the desktop app/));
+  expect(screen.getByRole('alert').textContent).not.toContain('[object');
 });
 
 it('disables Connect while a save is in flight and ignores a second click', async () => {
