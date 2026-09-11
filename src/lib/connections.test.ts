@@ -27,7 +27,17 @@ import {
 } from './connections';
 
 const requestMock = vi.mocked(request);
-beforeEach(() => requestMock.mockReset());
+// Braces, not a bare expression. `mockReset()` returns the mock, and an arrow
+// with an expression body returns it too — which Vitest reads as a teardown
+// callback and INVOKES after each test. Today that is harmless (the mock is
+// reset and returns undefined), but the moment a test in this file configures
+// mockRejectedValue, the teardown call produces an unhandled rejection and the
+// test fails after its own assertions passed. Verified: the failure surfaces as
+// the rejection's message with no reference to the beforeEach that caused it,
+// which makes it expensive to diagnose from the symptom.
+beforeEach(() => {
+  requestMock.mockReset();
+});
 
 describe('method names and shapes', () => {
   it('lists connections', async () => {
