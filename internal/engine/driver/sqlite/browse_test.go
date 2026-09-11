@@ -3,9 +3,14 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
 
 	_ "modernc.org/sqlite"
@@ -247,5 +252,668 @@ func TestBrowseQuotesIdentifiers(t *testing.T) {
 	})
 	if err != nil || len(page.Rows) == 0 {
 		t.Fatalf("users was damaged by the injection attempt: %v", err)
+	}
+}
+
+// -- adversarial fixtures ------------------------------------------------
+//
+// Every fixture above is well-shaped: a rowid table, a declared key, no
+// NULLs where they matter, a name that needs no quoting. The bugs this
+// driver can actually ship are all in the shapes below — an empty table, a
+// cursor that lands on the last row, a sort column that is entirely
+// duplicates or entirely NULL, a table SQLite gives no rowid, a column
+// literally named "rowid", a key whose value cannot survive being rendered
+// as text. They earn their keep by being run through pageAll, which asserts
+// the property that matters rather than the shape of one page: paging a
+// table to exhaustion returns every row exactly once.
+
+func browseOpen(t *testing.T, readOnly bool, stmts ...string) driver.Browser {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "adversarial.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("stmt %q: %v", s, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+
+	c, err := New().Open(context.Background(), driver.ConnConfig{
+		Driver: "sqlite", File: path, ReadOnly: readOnly,
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return browser(t, c)
+}
+
+func browseOn(t *testing.T, stmts ...string) driver.Browser {
+	t.Helper()
+	return browseOpen(t, false, stmts...)
+}
+
+// pageAll pages req to exhaustion, echoing back exactly what the driver
+// handed out, and returns every row it saw in order. The page-count guard is
+// load-bearing: a keyset predicate that fails to advance repeats its page
+// forever, and a test that hangs reports nothing.
+func pageAll(t *testing.T, b driver.Browser, req driver.BrowseRequest) [][]driver.Value {
+	t.Helper()
+	var all [][]driver.Value
+	for pages := 0; ; pages++ {
+		if pages > 100 {
+			t.Fatalf("pagination did not terminate after %d pages", pages)
+		}
+		page, err := b.Browse(context.Background(), req)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		all = append(all, page.Rows...)
+		if page.Exhausted {
+			return all
+		}
+		req.After, req.Offset = page.Keyset, page.Offset
+	}
+}
+
+func texts(rows [][]driver.Value, col int) []string {
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = row[col].Text
+	}
+	return out
+}
+
+func wantEachOnce(t *testing.T, got []string, want []string) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, g := range got {
+		seen[g]++
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d rows %v, want %d", len(got), got, len(want))
+	}
+	for _, w := range want {
+		if seen[w] != 1 {
+			t.Errorf("%q appeared %d times, want exactly once (whole result: %v)", w, seen[w], got)
+		}
+	}
+}
+
+func wantOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows %v, want %d %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestBrowseOnAnEmptyTableReturnsColumnsAndNoRows(t *testing.T) {
+	b := browser(t, browseFixture(t, 0))
+	page, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 5,
+	})
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(page.Columns) != 4 {
+		t.Errorf("an empty table reported %d columns, want 4", len(page.Columns))
+	}
+	if len(page.Rows) != 0 {
+		t.Errorf("an empty table returned %d rows", len(page.Rows))
+	}
+	if !page.Exhausted {
+		t.Error("an empty table did not report Exhausted")
+	}
+	if page.Keyset != nil {
+		t.Errorf("an empty table handed out a keyset: %+v", page.Keyset)
+	}
+}
+
+// The page that lands exactly on the last row cannot know it is last: it is
+// full, so it reports a keyset. The continuation must come back empty and
+// exhausted rather than repeating anything.
+func TestBrowseContinuationPastTheLastRowReturnsNothing(t *testing.T) {
+	b := browser(t, browseFixture(t, 8))
+	req := driver.BrowseRequest{Database: "main", Table: "users", Limit: 4}
+
+	var last *driver.BrowsePage
+	for i := 0; i < 2; i++ {
+		page, err := b.Browse(context.Background(), req)
+		if err != nil {
+			t.Fatalf("page %d: %v", i, err)
+		}
+		if page.Exhausted {
+			t.Fatalf("page %d of 4 rows out of 8 reported Exhausted", i)
+		}
+		req.After, last = page.Keyset, page
+	}
+
+	page, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 4, After: last.Keyset,
+	})
+	if err != nil {
+		t.Fatalf("continuation: %v", err)
+	}
+	if len(page.Rows) != 0 {
+		t.Errorf("a continuation past the last row returned %d rows", len(page.Rows))
+	}
+	if !page.Exhausted {
+		t.Error("an empty continuation did not report Exhausted")
+	}
+}
+
+const dupDDL = `CREATE TABLE dups (id INTEGER PRIMARY KEY, bucket TEXT NOT NULL)`
+
+func dupRows() []string {
+	// Twelve rows across three buckets of unequal size, so that a page of
+	// five always cuts through the middle of a bucket — the boundary a
+	// tiebreaker exists for.
+	return []string{
+		`INSERT INTO dups VALUES (1,'a'),(2,'a'),(3,'a'),(4,'a'),(5,'a'),
+		 (6,'b'),(7,'b'),(8,'b'),(9,'b'),(10,'c'),(11,'c'),(12,'c')`,
+	}
+}
+
+func allIDs(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = itoa(i + 1)
+	}
+	return out
+}
+
+// The case the tiebreaker exists for: every page boundary falls inside a run
+// of identical sort values, where a keyset on the sort column alone would
+// skip or repeat whichever rows shared the boundary value.
+func TestBrowseOnDuplicateSortValuesPagesEveryRowExactlyOnce(t *testing.T) {
+	b := browseOn(t, append([]string{dupDDL}, dupRows()...)...)
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "dups", Limit: 5,
+		Sort: []driver.SortKey{{Column: "bucket"}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(12))
+	wantOrder(t, texts(rows, 1), []string{"a", "a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c"})
+}
+
+func TestBrowseOnDuplicateSortValuesDescendingPagesEveryRowExactlyOnce(t *testing.T) {
+	b := browseOn(t, append([]string{dupDDL}, dupRows()...)...)
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "dups", Limit: 5,
+		Sort: []driver.SortKey{{Column: "bucket", Desc: true}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(12))
+	wantOrder(t, texts(rows, 1), []string{"c", "c", "c", "b", "b", "b", "b", "a", "a", "a", "a", "a"})
+}
+
+const nullsDDL = `CREATE TABLE nulls (id INTEGER PRIMARY KEY, tag TEXT)`
+
+var nullsRows = []string{
+	`INSERT INTO nulls VALUES (1,NULL),(2,'m'),(3,NULL),(4,'z'),(5,NULL),(6,'m'),(7,NULL)`,
+}
+
+// NULLs are where a row-value keyset silently loses rows: the comparison
+// evaluates to NULL rather than true or false, so WHERE drops everything
+// past the boundary. SQLite sorts NULLs first ascending, so the page
+// boundary here lands inside the run of them.
+func TestBrowseOnAPartlyNullSortColumnPagesEveryRowExactlyOnce(t *testing.T) {
+	b := browseOn(t, append([]string{nullsDDL}, nullsRows...)...)
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "nulls", Limit: 2,
+		Sort: []driver.SortKey{{Column: "tag"}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(7))
+	wantOrder(t, texts(rows, 0), []string{"1", "3", "5", "7", "2", "6", "4"})
+}
+
+// Descending, the same NULLs sort LAST, so "after" means something different
+// on both halves of the column and the boundary lands in the values instead.
+func TestBrowseDescendingOnAPartlyNullSortColumnPagesEveryRowExactlyOnce(t *testing.T) {
+	b := browseOn(t, append([]string{nullsDDL}, nullsRows...)...)
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "nulls", Limit: 2,
+		Sort: []driver.SortKey{{Column: "tag", Desc: true}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(7))
+	wantOrder(t, texts(rows, 0), []string{"4", "2", "6", "1", "3", "5", "7"})
+}
+
+// A descending sort on a column that is nothing but NULLs: every page
+// boundary sits between two NULLs, where the "strictly after" term is
+// vacuously false and only the tiebreaker can separate the rows.
+func TestBrowseDescendingOnAnAllNullSortColumnPagesEveryRowExactlyOnce(t *testing.T) {
+	const total = 9
+	b := browser(t, browseFixture(t, total))
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 4,
+		Sort: []driver.SortKey{{Column: "note", Desc: true}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(total))
+}
+
+func TestBrowseOnARealSortColumnPagesEveryRowExactlyOnce(t *testing.T) {
+	const total = 11
+	b := browser(t, browseFixture(t, total))
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 3,
+		Sort: []driver.SortKey{{Column: "score"}},
+	})
+	wantEachOnce(t, texts(rows, 0), allIDs(total))
+	wantOrder(t, texts(rows, 0), allIDs(total))
+}
+
+func TestBrowseAcceptsASortColumnInAnyCase(t *testing.T) {
+	b := browser(t, browseFixture(t, 3))
+	page, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 3,
+		Sort: []driver.SortKey{{Column: "ID", Desc: true}},
+	})
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	wantOrder(t, texts(page.Rows, 0), []string{"3", "2", "1"})
+}
+
+// A DATETIME column is the one modernc.org/sqlite converts to time.Time, so
+// its Value carries an RFC3339 rendering rather than the text SQLite stored.
+// Binding that back would compare against a string the column does not hold,
+// so the driver must page this by offset instead — and still see every row.
+func TestBrowseOnADatetimeSortColumnPagesByOffset(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, at DATETIME NOT NULL)`,
+		`INSERT INTO events VALUES (1,'2024-03-01 09:00:00'),(2,'2024-03-01 10:00:00'),
+		 (3,'2024-03-02 09:00:00'),(4,'2024-03-02 10:00:00'),(5,'2024-03-03 09:00:00')`)
+
+	req := driver.BrowseRequest{
+		Database: "main", Table: "events", Limit: 2,
+		Sort: []driver.SortKey{{Column: "at"}},
+	}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if page.Keyset != nil {
+		t.Errorf("a time-valued sort handed out a keyset it cannot accept back: %+v", page.Keyset)
+	}
+	if page.Offset != 2 {
+		t.Errorf("Offset = %d, want 2", page.Offset)
+	}
+	wantOrder(t, texts(pageAll(t, b, req), 0), allIDs(5))
+}
+
+// A BLOB key has no faithful text form, and SQLite sorts every BLOB above
+// every TEXT — so binding a rendered blob back would match every row and
+// serve the same page forever. Offset paging is correct here, and the page
+// guard inside pageAll is what proves the loop terminates.
+func TestBrowseOnABlobPrimaryKeyPagesByOffset(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE keyed (k BLOB PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO keyed VALUES (x'ff01','a'),(x'ff02','b'),(x'ff03','c'),(x'ff04','d'),(x'ff05','e')`)
+
+	req := driver.BrowseRequest{Database: "main", Table: "keyed", Limit: 2}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if page.Keyset != nil {
+		t.Errorf("a blob key handed out a keyset: %+v", page.Keyset)
+	}
+	wantOrder(t, texts(pageAll(t, b, req), 1), []string{"a", "b", "c", "d", "e"})
+}
+
+// SQLite's affinities are preferences, not constraints: a TEXT column stores
+// a BLOB handed to it verbatim. The declared type said the key would page,
+// the value says otherwise, and refusing beats handing back a cursor that
+// would silently serve the wrong rows.
+func TestBrowseRefusesAKeysetItCouldNotAcceptBack(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE smuggled (k TEXT PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO smuggled VALUES (x'ff01','a'),(x'ff02','b'),(x'ff03','c')`)
+
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "smuggled", Limit: 2,
+	})
+	if err == nil {
+		t.Fatal("a keyset was built from a value that cannot be bound back")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindUnsupported {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindUnsupported, err)
+	}
+}
+
+// A WITHOUT ROWID table has no rowid to fall back on, but SQLite requires it
+// to declare a primary key and enforces that key NOT NULL — so there, and
+// only there, the primary key is a sound tiebreaker.
+func TestBrowseOnAWithoutRowidTableKeysetsOnThePrimaryKey(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a,b)) WITHOUT ROWID`,
+		`INSERT INTO pairs VALUES ('x','1','n'),('x','2','n'),('y','1','n'),('y','2','n'),('z','1','n')`)
+
+	req := driver.BrowseRequest{Database: "main", Table: "pairs", Limit: 2}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(page.Keyset) != 2 {
+		t.Fatalf("keyset = %+v, want the two primary-key columns", page.Keyset)
+	}
+	wantOrder(t, texts(pageAll(t, b, req), 1), []string{"1", "2", "1", "2", "1"})
+}
+
+// The same table sorted by a column that is not part of the key: the whole
+// key has to be appended, not just the part of it the sort happens to name.
+func TestBrowseOnAWithoutRowidTableAppendsTheKeyToACallerSort(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a,b)) WITHOUT ROWID`,
+		`INSERT INTO pairs VALUES ('x','1','same'),('x','2','same'),('y','1','same'),
+		 ('y','2','same'),('z','1','same'),('z','2','same')`)
+
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: "pairs", Limit: 4,
+		Sort: []driver.SortKey{{Column: "note"}, {Column: "a"}},
+	})
+	wantOrder(t, texts(rows, 1), []string{"1", "2", "1", "2", "1", "2"})
+}
+
+// A view has neither a rowid nor a key, so nothing can make its ordering
+// total. Offset paging is the honest answer, and Keyset must stay absent so
+// the caller never echoes back a cursor the driver cannot honour.
+func TestBrowseOnAViewPagesByOffset(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE source (id INTEGER PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO source VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')`,
+		`CREATE VIEW labels AS SELECT id, label FROM source`)
+
+	req := driver.BrowseRequest{Database: "main", Table: "labels", Limit: 2}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if page.Keyset != nil {
+		t.Errorf("a view handed out a keyset: %+v", page.Keyset)
+	}
+	if page.Offset != 2 {
+		t.Errorf("Offset = %d, want 2", page.Offset)
+	}
+	wantEachOnce(t, texts(pageAll(t, b, req), 0), allIDs(5))
+}
+
+// "rowid" is a legal column name, and a column of that name SHADOWS the real
+// rowid: an unqualified reference silently resolves to the user's column,
+// which is under no obligation to be unique. SQLite keeps two more spellings
+// for exactly this, and the driver has to reach for one of them.
+func TestBrowseOnATableWithAColumnNamedRowidStillKeysets(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE shadowed (rowid TEXT, label TEXT NOT NULL)`,
+		`INSERT INTO shadowed VALUES ('same','a'),('same','b'),('same','c'),('same','d'),('same','e')`)
+
+	req := driver.BrowseRequest{Database: "main", Table: "shadowed", Limit: 2}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if len(page.Keyset) == 0 {
+		t.Error("a shadowed rowid fell back to offset when _rowid_ was available")
+	}
+	if len(page.Columns) != 2 {
+		t.Errorf("columns = %+v, want the table's own two", page.Columns)
+	}
+	wantOrder(t, texts(pageAll(t, b, req), 1), []string{"a", "b", "c", "d", "e"})
+}
+
+// All three spellings shadowed, so the rowid is unreachable by any
+// expression and nothing else on this table is guaranteed unique.
+func TestBrowseWhenEveryRowidSpellingIsShadowedPagesByOffset(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE hidden (rowid TEXT, _rowid_ TEXT, oid TEXT, label TEXT NOT NULL)`,
+		`INSERT INTO hidden VALUES ('1','1','1','a'),('1','1','1','b'),('1','1','1','c')`)
+
+	req := driver.BrowseRequest{Database: "main", Table: "hidden", Limit: 2}
+	page, err := b.Browse(context.Background(), req)
+	if err != nil {
+		t.Fatalf("browse: %v", err)
+	}
+	if page.Keyset != nil {
+		t.Errorf("an unreachable rowid still produced a keyset: %+v", page.Keyset)
+	}
+	wantEachOnce(t, texts(pageAll(t, b, req), 3), []string{"a", "b", "c"})
+}
+
+// A quote inside an identifier has to survive both the table name and the
+// sort column, in the SELECT list, the ORDER BY and the keyset predicate.
+func TestBrowseOnIdentifiersThatNeedQuoting(t *testing.T) {
+	b := browseOn(t,
+		`CREATE TABLE "we""ird" (id INTEGER PRIMARY KEY, "co""l" TEXT NOT NULL)`,
+		`INSERT INTO "we""ird" VALUES (1,'same'),(2,'same'),(3,'same'),(4,'same'),(5,'same')`)
+
+	rows := pageAll(t, b, driver.BrowseRequest{
+		Database: "main", Table: `we"ird`, Limit: 2,
+		Sort: []driver.SortKey{{Column: `co"l`}},
+	})
+	wantOrder(t, texts(rows, 0), allIDs(5))
+}
+
+func TestBrowseWorksOnAReadOnlyConnection(t *testing.T) {
+	b := browseOpen(t, true,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c')`)
+
+	rows := pageAll(t, b, driver.BrowseRequest{Database: "main", Table: "t", Limit: 2})
+	wantOrder(t, texts(rows, 0), allIDs(3))
+}
+
+func TestBrowseRejectsAnUnknownDatabase(t *testing.T) {
+	b := browser(t, browseFixture(t, 1))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "elsewhere", Table: "users", Limit: 5,
+	})
+	if err == nil {
+		t.Fatal("browsing an unknown database succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindNotFound {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindNotFound, err)
+	}
+}
+
+func TestBrowseRejectsAnUnknownSortColumn(t *testing.T) {
+	b := browser(t, browseFixture(t, 1))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 5,
+		Sort: []driver.SortKey{{Column: "nope"}},
+	})
+	if err == nil {
+		t.Fatal("an unknown sort column was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+}
+
+// A Keyset is opaque, but it is not unvalidated: a cursor of the wrong width
+// cannot be matched against the sort it was supposedly taken from, and
+// guessing would silently serve a page from the wrong place.
+func TestBrowseRejectsACursorOfTheWrongWidth(t *testing.T) {
+	b := browser(t, browseFixture(t, 5))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		After: []driver.Value{{Kind: driver.ValueInt, Text: "1"}},
+	})
+	if err == nil {
+		t.Fatal("a cursor narrower than the sort was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+}
+
+func TestBrowseRejectsACursorWithUnparseableValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sort  []driver.SortKey
+		after []driver.Value
+		kind  dberr.Kind
+	}{
+		{
+			name:  "integer",
+			after: []driver.Value{{Kind: driver.ValueInt, Text: "not a number"}, {Kind: driver.ValueInt, Text: "1"}},
+			kind:  dberr.KindInvalid,
+		},
+		{
+			name:  "float",
+			sort:  []driver.SortKey{{Column: "score"}},
+			after: []driver.Value{{Kind: driver.ValueFloat, Text: "not a number"}, {Kind: driver.ValueInt, Text: "1"}},
+			kind:  dberr.KindInvalid,
+		},
+		{
+			name:  "bytes",
+			after: []driver.Value{{Kind: driver.ValueBytes, Text: "3 bytes"}, {Kind: driver.ValueInt, Text: "1"}},
+			kind:  dberr.KindUnsupported,
+		},
+		{
+			// The tiebreaker position, so the failure comes from a tied
+			// clause rather than the leading one.
+			name:  "tiebreaker",
+			after: []driver.Value{{Kind: driver.ValueInt, Text: "1"}, {Kind: driver.ValueInt, Text: "oops"}},
+			kind:  dberr.KindInvalid,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := browser(t, browseFixture(t, 5))
+			_, err := b.Browse(context.Background(), driver.BrowseRequest{
+				Database: "main", Table: "users", Limit: 2,
+				Sort: tc.sort, After: tc.after,
+			})
+			if err == nil {
+				t.Fatal("a malformed cursor was accepted")
+			}
+			if got := dberr.From(err); got.Kind != tc.kind {
+				t.Errorf("kind = %q, want %q (err: %v)", got.Kind, tc.kind, err)
+			}
+		})
+	}
+}
+
+func TestBrowseWithACanceledContextReportsCanceled(t *testing.T) {
+	b := browser(t, browseFixture(t, 3))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := b.Browse(ctx, driver.BrowseRequest{Database: "main", Table: "users", Limit: 2})
+	if err == nil {
+		t.Fatal("browse with an already-canceled context succeeded")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindCanceled {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindCanceled, err)
+	}
+}
+
+// -- a scripted driver for the two failures a real database will not produce
+
+// browseScript answers the PRAGMA and the rowid probe Browse issues first,
+// then fails the page query. A real SQLite database cannot produce that
+// pairing: PRAGMA table_info fails, or returns nothing, for anything the
+// following SELECT could not also read, and a healthy connection does not
+// drop halfway through a result set. Leaving the two paths untested is how
+// an error ends up dropped rather than classified, so they are scripted —
+// the same technique, and the same one-off driver naming, as
+// coverage_test.go.
+type browseScript struct {
+	pageErr  error
+	pageRows *scriptedRows
+}
+
+func (s browseScript) rowsFor(query string) (sqldriver.Rows, error) {
+	switch {
+	case strings.HasPrefix(query, "PRAGMA"):
+		return &scriptedRows{
+			cols: []string{"cid", "name", "type", "notnull", "dflt_value", "pk"},
+			rows: [][]sqldriver.Value{{int64(0), "id", "INTEGER", int64(1), nil, int64(1)}},
+		}, nil
+	case strings.Contains(query, "ORDER BY"):
+		if s.pageErr != nil {
+			return nil, s.pageErr
+		}
+		return s.pageRows, nil
+	}
+	// The rowid probe, which only has to not fail.
+	return &scriptedRows{cols: []string{"rowid"}}, nil
+}
+
+type browseScriptConn struct{ script browseScript }
+
+func (c browseScriptConn) Prepare(string) (sqldriver.Stmt, error) {
+	return nil, errors.New("browseScript: Prepare not supported")
+}
+func (c browseScriptConn) Close() error { return nil }
+func (c browseScriptConn) Begin() (sqldriver.Tx, error) {
+	return nil, errors.New("browseScript: Begin not supported")
+}
+func (c browseScriptConn) Query(query string, _ []sqldriver.Value) (sqldriver.Rows, error) {
+	return c.script.rowsFor(query)
+}
+
+type browseScriptDriver struct{ script browseScript }
+
+func (d browseScriptDriver) Open(string) (sqldriver.Conn, error) {
+	return browseScriptConn{script: d.script}, nil
+}
+
+func browseScripted(t *testing.T, script browseScript) driver.Browser {
+	t.Helper()
+	// Unique per registration: sql.Register panics on a repeated name and
+	// `go test -count=2` runs this twice in one process.
+	name := fmt.Sprintf("browse-script#%d", scriptedDriverSeq.Add(1))
+	sql.Register(name, browseScriptDriver{script: script})
+	db, err := sql.Open(name, "x")
+	if err != nil {
+		t.Fatalf("open %s: %v", name, err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &conn{db: db}
+}
+
+func TestBrowseReportsAFailingPageQuery(t *testing.T) {
+	b := browseScripted(t, browseScript{pageErr: errors.New("simulated page failure")})
+	if _, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "t", Limit: 2,
+	}); err == nil {
+		t.Fatal("a failing page query was reported as a page")
+	}
+}
+
+func TestBrowseReportsAReadFailurePartWayThroughAPage(t *testing.T) {
+	b := browseScripted(t, browseScript{pageRows: &scriptedRows{
+		// One visible column, then the two keyset columns and the two
+		// typeof() terms that ride along with them.
+		cols:     []string{"id", "id", "rowid", "t1", "t2"},
+		rows:     [][]sqldriver.Value{{int64(1), int64(1), int64(1), "integer", "integer"}},
+		errAfter: errors.New("simulated read failure"),
+	}})
+	if _, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "t", Limit: 2,
+	}); err == nil {
+		t.Fatal("a read failure part way through a page was reported as a page")
+	}
+}
+
+func TestBrowseRejectsANegativeOffset(t *testing.T) {
+	b := browser(t, browseFixture(t, 3))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2, Offset: -1,
+	})
+	if err == nil {
+		t.Fatal("a negative offset was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
 	}
 }

@@ -17,8 +17,9 @@ import (
 // makes SQLite walk and discard every skipped row, so scrolling to row
 // 500,000 costs 500,000 discarded rows, while a keyset predicate seeks
 // straight to the boundary. Offset paging is the fallback of last resort,
-// used here only for views and for tables whose key cannot survive the trip
-// through driver.Value (see keysetSafe and keysetArg).
+// used here only for views, for tables whose rowid is unreachable, and for
+// tables whose key cannot survive the trip out through driver.Value and back
+// (see keysetSafe).
 //
 // Totality is what makes keyset correct, and it is the whole trick. A sort
 // on a non-unique column cannot be paged by key on its own: two rows sharing
@@ -40,6 +41,14 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	if req.Database != "" && req.Database != databaseName {
 		return nil, dberr.New(dberr.KindNotFound, "no such database: "+req.Database)
 	}
+	// SQLite reads a negative OFFSET as zero rather than rejecting it, which
+	// would turn a caller's arithmetic slip into a page that serves the top of
+	// the table and reports a next-offset further below zero — the same page,
+	// forever. BrowseRequest.Validate has no opinion on Offset because a
+	// driver that does not paginate by offset has no use for one.
+	if req.Offset < 0 {
+		return nil, dberr.New(dberr.KindInvalid, "browse: offset cannot be negative")
+	}
 
 	// Columns is the source of the visible column set AND the reason a
 	// missing table reports NotFound here: PRAGMA table_info returns zero
@@ -60,12 +69,23 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	// them by expression rather than reaching for `SELECT *` plus rowid is
 	// what keeps rowid — or any sort column that is not part of the table's
 	// visible set — out of the user's grid.
-	sel := make([]string, 0, len(cols)+len(order))
+	sel := make([]string, 0, len(cols)+2*len(order))
 	for _, col := range cols {
 		sel = append(sel, c.Quote(col.Name))
 	}
-	for _, t := range order {
-		sel = append(sel, t.expr)
+	if byKey {
+		for _, t := range order {
+			sel = append(sel, t.expr)
+		}
+		// typeof() rides along so the keyset can be judged on the value's
+		// STORAGE CLASS rather than on its column's declared type. It has to
+		// come from SQLite because it cannot be recovered afterwards: the
+		// cursor turns every []byte into a Go string on the way out (see
+		// cursor.Next), so a blob and a text value are the same thing by the
+		// time they reach driver.Normalize.
+		for _, t := range order {
+			sel = append(sel, "typeof("+t.expr+")")
+		}
 	}
 
 	var where string
@@ -132,20 +152,31 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 		last := rows[len(rows)-1]
 		keyset := make([]driver.Value, len(order))
 		for i := range order {
-			keyset[i] = driver.Normalize(last[len(cols)+i])
 			// A Keyset is a promise that handing it back in After produces
-			// the next page. Checking here that every value it carries can be
-			// bound again keeps that promise from being broken later, in the
-			// silent way — a value that cannot round-trip binds as something
-			// else and pages wrong rather than failing.
-			if _, err := keysetArg(keyset[i]); err != nil {
-				return nil, err
+			// the next page, and a blob cannot keep it. SQLite's affinities
+			// are preferences, not constraints — a TEXT column stores a BLOB
+			// handed to it verbatim — so keysetSafe's reading of the declared
+			// type is not the last word, and this is. Binding a blob back as
+			// the text it was rendered into compares TEXT against BLOB
+			// storage, and SQLite sorts every blob above every string: the
+			// predicate would match the cursor's own row, and the next page
+			// would be the page before it, forever. Refusing is loud; that
+			// loop is not.
+			if class, _ := last[len(cols)+len(order)+i].(string); class == blobClass {
+				return nil, dberr.New(dberr.KindUnsupported,
+					"browse: a key column holds binary data")
 			}
+			keyset[i] = driver.Normalize(last[len(cols)+i])
 		}
 		page.Keyset = keyset
 	}
 	return page, nil
 }
+
+// blobClass is what SQLite's typeof() calls a value stored as bytes. Its
+// four siblings — null, integer, real, text — all map onto a driver.Value
+// that keysetArg can bind back, which is why only this one is turned away.
+const blobClass = "blob"
 
 // orderTerm is one ORDER BY term with its column already rendered as SQL.
 type orderTerm struct {
@@ -317,18 +348,17 @@ func keysetSafe(declType string) bool {
 
 // keysetArg turns one keyset value back into a bound parameter.
 //
-// It is deliberately the SAME function on both sides of the round trip: the
-// values handed out in a Keyset are checked through it before they leave, so
-// a cursor this driver issued is always one it will accept back. Anything it
-// rejects is either a cursor the caller made up or a value that could not
-// have been rendered faithfully in the first place.
+// A NULL never arrives here: its comparison is expressed structurally, by IS
+// NULL and IS NOT NULL, because `col > NULL` evaluates to NULL and would
+// quietly drop every row rather than compare it. See afterTerm.
+//
+// What it accepts is the other half of the promise a Keyset makes. Every
+// value this driver hands out has already been screened twice — keysetSafe
+// on the column's declared affinity, typeof() on the value's storage class —
+// so a cursor this driver issued is always one it accepts back, and anything
+// it turns away is a cursor the caller made up.
 func keysetArg(v driver.Value) (any, error) {
 	switch v.Kind {
-	case driver.ValueNull:
-		// Never bound: a NULL comparison is expressed structurally, by IS
-		// NULL and IS NOT NULL, since `col > NULL` is NULL and would quietly
-		// drop every row. See afterTerm.
-		return nil, nil
 	case driver.ValueInt:
 		n, err := strconv.ParseInt(v.Text, 10, 64)
 		if err != nil {
@@ -344,13 +374,12 @@ func keysetArg(v driver.Value) (any, error) {
 	case driver.ValueText:
 		return v.Text, nil
 	}
-	// Reached when a BLOB turns up in a column whose declared affinity said
-	// it would not (SQLite's affinities are preferences, not constraints: a
-	// TEXT column will store a BLOB handed to it verbatim), and for any kind
-	// a future Normalize learns to produce. Refusing is the point — paging on
-	// a value that cannot be bound back would repeat or skip rows silently.
+	// Bytes have no faithful text form, times are re-rendered rather than
+	// echoed, and a kind a future Normalize learns to produce is unknown
+	// here by definition. Refusing is the point: binding a value that does
+	// not reconstruct the original repeats or skips rows silently.
 	return nil, dberr.New(dberr.KindUnsupported,
-		"browse: this table cannot be paged by key")
+		"browse: this cursor cannot be paged by key")
 }
 
 // keysetPredicate renders "strictly after the row this cursor names", in the
