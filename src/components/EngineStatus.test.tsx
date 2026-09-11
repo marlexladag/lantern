@@ -1,4 +1,9 @@
 import { it, expect, vi, beforeEach } from 'vitest';
+// vitest.config.ts sets `css: true`, so this applies spec section 12's real
+// user-select policy to this document — the same reason Sidebar.test.tsx
+// imports it. The rule under test is a cascade rule, not a value this
+// component sets.
+import '../styles/chrome.css';
 import { render, screen, waitFor, act } from '@testing-library/react';
 
 vi.mock('../lib/engine', async () => {
@@ -286,4 +291,28 @@ it('unregisters the state-change listener if the component unmounts before onSta
   // immediately rather than stored, or it would leak: nothing is left to
   // ever call unlisten() on it otherwise.
   expect(unlistenSpy).toHaveBeenCalledTimes(1);
+});
+
+/*
+ * Spec section 12: UI chrome is not selectable, and the short list of things
+ * a person legitimately copies opts back in (src/styles/chrome.css). The
+ * sidecar-death message belongs on that list for the same reason ErrorText's
+ * does — it is what someone pastes into a bug report — and was the one error
+ * surface left off it.
+ */
+it('leaves the engine failure message selectable, like every other error text', async () => {
+  healthMock.mockRejectedValue({
+    code: EngineErrorCode.Unavailable,
+    message: 'cannot resolve sidecar: program not found',
+  });
+
+  render(<EngineStatus />);
+  await screen.findByText(/cannot resolve sidecar/i);
+
+  const message = document.querySelector('.engine-error-message') as HTMLElement;
+  expect(getComputedStyle(message).userSelect).toBe('text');
+  // The badge and the numeric code beside it are chrome, and stay chrome:
+  // an exception that swallowed the whole panel would be the policy
+  // reversed, not applied.
+  expect(getComputedStyle(document.querySelector('.engine-error-badge') as HTMLElement).userSelect).toBe('none');
 });

@@ -34,13 +34,22 @@
  * Error text is what people copy into a search box or a bug report — both
  * the engine's message and the driver's own words behind ErrorText's Details
  * disclosure, which exists to be read and quoted (the <summary> control that
- * opens it is chrome, and stays unselectable). Form fields need it to let a
- * user select what they typed. `[data-selectable]` is the hook for the
- * result grid's data cells and the query editor, neither of which exists
- * yet: when they land they must not have to relitigate this policy.
+ * opens it is chrome, and stays unselectable). That includes
+ * EngineStatus's own message, which does not render through ErrorText: it
+ * is what the user sees when the sidecar dies, so it is the single most
+ * copy-worthy string in the app, and every reason for the two classes above
+ * applies to it unchanged. Routing EngineStatus through ErrorText would let
+ * it inherit the policy instead of being listed here, and is the better
+ * long-term shape; it is a larger change than adding a selector.
+ *
+ * Form fields need it to let a user select what they typed.
+ * `[data-selectable]` is the hook for the result grid's data cells and the
+ * query editor, neither of which exists yet: when they land they must not
+ * have to relitigate this policy.
  */
 .error-text-message,
 .error-text-native-body,
+.engine-error-message,
 input,
 textarea,
 [data-selectable],
