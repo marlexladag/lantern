@@ -127,9 +127,12 @@ type Driver interface {
 // Required of every driver.
 type Conn interface {
     Ping(ctx context.Context) error
-    // Introspect reads the database and table lists, but NOT columns.
+    // Introspect reads the DATABASE list only — the connect-time call.
+    // Section 5 is the authority on why laziness is two tiers.
     Introspect(ctx context.Context) (*schema.Catalog, error)
-    // Columns reads one table's columns, on expand. See Section 5.
+    // Tables reads one database's tables, when that database is expanded.
+    Tables(ctx context.Context, database string) ([]schema.Table, error)
+    // Columns reads one table's columns, when that table is expanded.
     Columns(ctx context.Context, database, table string) ([]schema.Column, error)
     Query(ctx context.Context, sql string, args ...any) (Cursor, error)
     Quote(ident string) string
@@ -169,6 +172,11 @@ type Cursor interface {
 `Capabilities` reports what the UI should hide: transactions, DDL, schemas vs
 databases, editable results, explain plans. Redis will report almost nothing
 and the UI will adapt rather than crash.
+
+*As built today `Introspect` returns databases AND tables in one call, and
+`Tables` does not exist. SQLite has a single hardcoded `main`, so the two tiers
+are indistinguishable there. The split lands with the MySQL driver, which is
+the first engine that cannot hide it — see Section 5.*
 
 `Quote` exists because identifier quoting differs per engine (backtick,
 double-quote, bracket) and generated SQL in `edit/` must never guess.
