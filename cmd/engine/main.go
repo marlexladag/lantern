@@ -169,6 +169,7 @@ func main() {
 	srv.Register("health", health.Handler(version, commit))
 	api.RegisterConnections(srv, st)
 	api.RegisterSession(srv, st, sess)
+	api.RegisterBrowse(srv, sess)
 
 	// Readiness marker: written once signal handling is registered and the
 	// handler is bound, immediately before Serve starts reading. This is a

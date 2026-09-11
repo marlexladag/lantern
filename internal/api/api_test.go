@@ -42,6 +42,7 @@ func newHarness(t *testing.T) *harness {
 	srv := rpc.NewServer()
 	RegisterConnections(srv, st)
 	RegisterSession(srv, st, sess)
+	RegisterBrowse(srv, sess)
 	t.Cleanup(sess.CloseAll)
 
 	return &harness{srv: srv, st: st, sess: sess, db: dbPath}
