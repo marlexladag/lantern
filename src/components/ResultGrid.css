@@ -1,0 +1,97 @@
+.result-grid {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+  font-family: var(--font-sans);
+  color: var(--color-text);
+}
+
+/*
+ * The grid fills this; the empty state sits on top of it rather than
+ * replacing it, so a table with no rows still shows its columns.
+ */
+.result-grid-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+ * Offset by exactly the header height so the message reads as the first
+ * row's worth of space rather than covering the column names. Transparent to
+ * the pointer: the grid underneath keeps its own click and scroll surface.
+ */
+.result-grid-empty {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--row-header);
+  padding: 12px var(--gutter-cell);
+  font-size: var(--text-body);
+  color: var(--color-dim);
+  pointer-events: none;
+}
+
+.result-grid-status {
+  flex: 0 0 auto;
+  height: var(--height-statusbar);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--gutter-cell);
+  border-top: var(--hairline) solid var(--color-line);
+  font-size: var(--text-label);
+  color: var(--color-dim);
+}
+
+/*
+ * Retryable, not destructive: --color-danger is reserved for production and
+ * destructive actions (Foundations.dc.html), which is why the sidebar's
+ * three failure surfaces use the same warn treatment. The rows above stay
+ * exactly where they were; this sits under them.
+ */
+.result-grid-error {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px var(--gutter-cell);
+  border-top: var(--hairline) solid var(--color-line);
+  background: var(--color-warn-bg);
+  font-size: var(--text-label);
+  color: var(--color-warn);
+}
+
+.result-grid-retry {
+  flex: 0 0 auto;
+  height: var(--control-toolbar);
+  padding: 0 10px;
+  border: var(--hairline) solid var(--color-warn);
+  border-radius: var(--radius-control-sm);
+  background: none;
+  color: var(--color-warn);
+  font-family: inherit;
+  font-size: var(--text-label);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.result-grid-retry:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/*
+ * Glide positions the overlay editor absolutely against this, so it has to
+ * be a fixed-position containing block at the viewport origin — the same
+ * shape as the `<div id="portal">` glide's own documentation asks for, kept
+ * inside the component instead of in index.html.
+ */
+.result-grid-portal {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 20;
+}

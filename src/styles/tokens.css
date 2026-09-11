@@ -55,6 +55,15 @@
   --control-toolbar: 23px;
   --control-dialog: 28px;
   --gutter-cell: 10px;
+  /*
+   * The result grid's default column width. Not in Foundations.dc.html:
+   * that mock hand-sizes every column to its content (70px for `id`, 236px
+   * for an email address), which a real grid cannot do without measuring
+   * text on the canvas first. 168px is the middle of that range and fits a
+   * timestamp, the widest value the design shows at a fixed width. It is a
+   * starting width, not a cap — the user drags from here.
+   */
+  --width-grid-column: 168px;
 
   /* Structure */
   --hairline: 1px;
