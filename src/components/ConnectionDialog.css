@@ -265,11 +265,20 @@
   color: #fff;
 }
 
+/*
+ * The footer is a fixed 58px, and this now holds an ErrorText — a message
+ * that can wrap, plus the Details disclosure when the engine sent a native
+ * text. Scroll the result rather than letting an expanded disclosure spill
+ * out of a dialog that clips its overflow.
+ */
 .test-result {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: var(--text-label);
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .test-result.ok {
