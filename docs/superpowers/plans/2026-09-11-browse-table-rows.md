@@ -906,7 +906,27 @@ git commit -m "feat(api): expose stateless table browsing over JSON-RPC"
 
 **Cross-check `ValueKind` against `internal/engine/driver/value.go`'s constants** the way `DbErrorKind` was checked — parse both and compare as sets. A drifted member is invisible to the compiler because the value arrives at runtime off a wire TypeScript does not police, and the symptom is a grid branch that silently never fires.
 
-- [ ] **Step 1:** Write `src/lib/browse.test.ts` asserting the method name and parameter shape for a first page and for a keyset continuation, that `MAX_BROWSE_LIMIT` matches the Go constant, and that a rejected browse surfaces through `asDbError` unchanged.
+- [ ] **Step 1:** Write `src/lib/browse.test.ts` asserting the method name and parameter shape for a first page and for a keyset continuation, and that a rejected browse surfaces through `describeError` — NOT `asDbError`, whose fallback is what rendered `[object Object]` at five call sites before Plan 2's fix wave.
+
+  **Check `ValueKind` and the limit mechanically, not by hand.** `ValueKind` is
+  the second cross-language enum in this codebase. The first one, `DbErrorKind`,
+  was introduced as a hand-matched union and drifted the moment an eleventh Kind
+  was added. `src/lib/connections.test.ts` already solves this: it reads the Go
+  source with Vite's `?raw` import, pulls the constants out with a regex, and
+  compares sets — carrying its own negative control, because two empty lists
+  compare equal and a regex that quietly stopped matching would make the real
+  assertion pass while checking nothing. Copy that shape:
+
+  - read `internal/engine/driver/value.go?raw`, extract the seven `ValueKind`
+    string literals, and assert set equality with the TypeScript union
+  - read `internal/engine/driver/browse.go?raw`, extract `MaxBrowseLimit`, and
+    assert it equals `MAX_BROWSE_LIMIT`
+  - include the negative control: assert the extracted list is non-empty and
+    the expected length, so a broken regex fails loudly instead of silently
+
+  Prove it goes red from both directions before moving on — add a fake member
+  to the Go source, watch it fail, revert; then add one to the TS union, watch
+  it fail, revert.
 - [ ] **Step 2:** Run it, confirm it fails on the missing import.
 - [ ] **Step 3:** Write `src/lib/browse.ts`.
 - [ ] **Step 4:** `npm test && npm run test:coverage && npm run typecheck` — all clean at 100%.
