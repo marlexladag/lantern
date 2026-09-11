@@ -1,0 +1,727 @@
+// Package drivertest is the conformance suite every driver must pass.
+//
+// Spec section 13 calls it the primary mechanism keeping many drivers honest,
+// and honesty is the whole point: the browse work established a set of
+// properties — every row exactly once, laziness in two tiers, a cursor that
+// cannot be replayed under a sort it was not issued for — which a second
+// driver would otherwise be free to break, quietly, in its own dialect. The
+// suite exists BEFORE the second driver so those properties are inherited
+// rather than re-argued.
+//
+// It is BLACK BOX. It drives a driver through internal/engine/driver's public
+// interfaces and nothing else, and it must never import
+// internal/engine/driver/keyset: a suite that reached into the shared keyset
+// machinery would be testing an implementation two drivers happen to share,
+// and would pass for a driver that shared the code while getting the
+// behaviour wrong — and it would have nothing to say about a driver that
+// reaches the same behaviour another way. What is asserted here is only what
+// a caller can see.
+//
+// A driver's own white-box tests are not replaced by this. Coverage is
+// measured per package with no -coverpkg, so nothing here contributes a line
+// of coverage to sqlite or keyset; deleting a driver's tests on the theory
+// that conformance covers them would delete both the tests and the coverage.
+package drivertest
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/marlexladag/lantern/internal/engine/dberr"
+	"github.com/marlexladag/lantern/internal/engine/driver"
+	"github.com/marlexladag/lantern/internal/engine/schema"
+)
+
+// TestingT is the reporting half of *testing.T.
+//
+// The suite is written against an interface rather than *testing.T so that it
+// can be tested itself: conformance_test.go runs the whole suite against
+// drivers that violate one invariant each and asserts the violation is
+// reported. A suite that cannot be made to fail certifies everything, and
+// there is no way to observe a *testing.T failing without failing the test
+// that owns it.
+type TestingT interface {
+	Helper()
+	Errorf(format string, args ...any)
+	Fatalf(format string, args ...any)
+}
+
+// SuiteT adds subtest grouping, which cannot be expressed in TestingT: a
+// subtest's function takes the SAME type it was started from, and *testing.T
+// spells that *testing.T. Naming it as a type parameter is what lets Run take
+// a plain *testing.T with no adapter at the call site while still accepting a
+// recording stand-in.
+type SuiteT[T any] interface {
+	TestingT
+	Run(name string, f func(T)) bool
+}
+
+// Fixtures carries the DDL the suite seeds with, in the engine's own dialect.
+//
+// Only CREATE TABLE is here. The rows are not: the suite has to KNOW exactly
+// what it seeded, because "every row exactly once" is a claim about a known
+// multiset, so it renders its own INSERT statements from data it holds and
+// keeps them to the literals every SQL dialect spells identically (integers,
+// short single-quoted ASCII, NULL). CREATE TABLE is the part engines genuinely
+// disagree about, and a shared literal there would be a lie.
+//
+// A driver whose dialect accepts the default says nothing. One that does not
+// supplies its own, keyed by table name, and must keep the column names and
+// nullability the suite asserts on: KeyColumn is a unique, non-null integer
+// key and ValueColumn is a nullable text column.
+type Fixtures struct {
+	Create map[string]string
+}
+
+func (f Fixtures) create(name string) string {
+	if stmt, ok := f.Create[name]; ok {
+		return stmt
+	}
+	return "CREATE TABLE " + name + " (" +
+		KeyColumn + " INTEGER PRIMARY KEY, " + ValueColumn + " TEXT)"
+}
+
+// Config is one driver's entry into the suite.
+type Config struct {
+	Driver driver.Driver
+	// Open returns a connection config pointing at a database the suite may
+	// create tables in. It is called more than once — each call must yield a
+	// usable connection, and for a file-backed engine that means creating the
+	// file, since a driver is entitled to refuse one that does not exist.
+	Open func(TestingT) driver.ConnConfig
+	DDL  Fixtures
+}
+
+// The tables the suite seeds. Exported so a driver supplying its own DDL
+// writes the same names.
+const (
+	TableRows  = "lantern_conf_rows"
+	TableTies  = "lantern_conf_ties"
+	TableNulls = "lantern_conf_nulls"
+	TableEmpty = "lantern_conf_empty"
+
+	// KeyColumn is unique and never null: it is what "every row exactly once"
+	// is counted by, and what a driver is expected to fall back on as its
+	// tiebreaker.
+	KeyColumn = "id"
+	// ValueColumn is nullable and holds duplicates. It is what the sort
+	// invariants sort by, so a driver that cannot form a total order without
+	// a tiebreaker fails them.
+	ValueColumn = "val"
+)
+
+const (
+	unknownDatabase = "lantern_conf_no_such_database"
+	unknownTable    = "lantern_conf_no_such_table"
+	// tieGroup is how many rows of TableTies share a value. Page sizes are
+	// derived from it below rather than listed, so a boundary is guaranteed to
+	// land inside a tie group however the fixture is edited: a fixture whose
+	// groups never straddle a boundary passes without a tiebreaker at all,
+	// which is the one thing these invariants exist to catch.
+	tieGroup = 3
+)
+
+type fixtureRow struct {
+	key int
+	val string
+	// null distinguishes a NULL from the empty string. They are different
+	// rows to sort and different cursors to carry, and a driver that
+	// collapses them repeats or drops a page.
+	null bool
+}
+
+type fixture struct {
+	name string
+	rows []fixtureRow
+}
+
+// fixtures is the whole of the suite's seed data.
+var fixtures = []fixture{
+	{name: TableRows, rows: distinctRows(7)},
+	{name: TableTies, rows: tiedRows(3, tieGroup)},
+	{name: TableNulls, rows: nullableRows(8)},
+	{name: TableEmpty},
+}
+
+func distinctRows(n int) []fixtureRow {
+	out := make([]fixtureRow, n)
+	for i := range out {
+		out[i] = fixtureRow{key: i + 1, val: fmt.Sprintf("r%d", i+1)}
+	}
+	return out
+}
+
+func tiedRows(groups, per int) []fixtureRow {
+	out := make([]fixtureRow, 0, groups*per)
+	for g := range groups {
+		for range per {
+			out = append(out, fixtureRow{key: len(out) + 1, val: fmt.Sprintf("g%d", g+1)})
+		}
+	}
+	return out
+}
+
+// nullableRows alternates so the NULLs form a run of n/2 once sorted: a page
+// size smaller than that run puts a boundary inside it, which is where a
+// driver that compares NULL with an ordinary operator loses every row past
+// the boundary.
+func nullableRows(n int) []fixtureRow {
+	out := make([]fixtureRow, n)
+	for i := range out {
+		out[i] = fixtureRow{key: i + 1, val: fmt.Sprintf("n%d", i+1), null: i%2 == 0}
+	}
+	return out
+}
+
+func fixtureNamed(name string) (fixture, bool) {
+	for _, fx := range fixtures {
+		if fx.name == name {
+			return fx, true
+		}
+	}
+	return fixture{}, false
+}
+
+// insert renders one INSERT per row. Per row rather than one multi-row
+// VALUES: the multi-row form is portable enough in practice, but a failure
+// then names a whole batch instead of the row that was refused.
+func (fx fixture) insert() []string {
+	out := make([]string, len(fx.rows))
+	for i, r := range fx.rows {
+		val := "NULL"
+		if !r.null {
+			val = "'" + r.val + "'"
+		}
+		out[i] = fmt.Sprintf("INSERT INTO %s (%s, %s) VALUES (%d, %s)",
+			fx.name, KeyColumn, ValueColumn, r.key, val)
+	}
+	return out
+}
+
+// keys is the multiset every walk of this table must return, as the text a
+// driver.Value carries.
+func (fx fixture) keys() []string {
+	out := make([]string, len(fx.rows))
+	for i, r := range fx.rows {
+		out[i] = strconv.Itoa(r.key)
+	}
+	return out
+}
+
+type pagingCase struct {
+	name  string
+	table string
+	sort  []driver.SortKey
+	// pages are the page sizes this table is walked at. One divides the row
+	// count exactly and one does not, because the two exercise different ends
+	// of the exhaustion condition: an exact division ends with a full page
+	// followed by an empty one, an inexact division with a short page.
+	pages []int
+}
+
+var ascending = []driver.SortKey{{Column: ValueColumn}}
+var descending = []driver.SortKey{{Column: ValueColumn, Desc: true}}
+
+var pagingCases = []pagingCase{
+	{name: "default_sort", table: TableRows, pages: []int{2, 3, 7}},
+	{name: "sorted_by_value", table: TableRows, sort: ascending, pages: []int{2, 3, 7}},
+	// tieGroup-1 and tieGroup+1 both put a boundary inside a group of equal
+	// values; tieGroup itself aligns with them, which is the case that passes
+	// without a tiebreaker and is here to be told apart from the others.
+	{name: "ties_ascending", table: TableTies, sort: ascending, pages: []int{tieGroup - 1, tieGroup, tieGroup + 1, 3 * tieGroup}},
+	{name: "ties_descending", table: TableTies, sort: descending, pages: []int{tieGroup - 1, tieGroup, tieGroup + 1, 3 * tieGroup}},
+	// 3 lands inside the run of four NULLs ascending; 5 lands inside it
+	// descending, where the run is at the far end.
+	{name: "nulls_ascending", table: TableNulls, sort: ascending, pages: []int{3, 5, 8}},
+	{name: "nulls_descending", table: TableNulls, sort: descending, pages: []int{3, 5, 8}},
+}
+
+// Run drives cfg's driver through every invariant the suite knows.
+//
+// It is generic over T so *testing.T satisfies it directly — a subtest's
+// function takes the type it was started from, which no plain interface can
+// name — and so the suite's own test can pass a recorder in its place.
+func Run[T SuiteT[T]](t T, cfg Config) {
+	t.Helper()
+	ctx := context.Background()
+
+	conn := connect(ctx, t, cfg)
+	defer func() { _ = conn.Close() }()
+	seed(ctx, t, conn, cfg.DDL)
+
+	cat, err := conn.Introspect(ctx)
+	if err != nil {
+		t.Fatalf("Introspect on a connection that has just been used: %v", err)
+	}
+	if len(cat.Databases) == 0 {
+		t.Fatalf("Introspect returned no databases; a driver must report at least one, " +
+			"since the UI has nothing to draw under the connection otherwise")
+	}
+	// The database the fixtures live in. A driver reporting several reports
+	// the one it connected to first; that is what Conn.Open was pointed at.
+	database := cat.Databases[0].Name
+
+	t.Run("introspect", func(t T) { checkIntrospect(t, cfg.Driver, cat) })
+	t.Run("tables", func(t T) { checkTables(ctx, t, conn, cat, database) })
+	t.Run("columns", func(t T) { checkColumns(ctx, t, conn, database) })
+	t.Run("quote", func(t T) { checkQuote(ctx, t, conn) })
+	t.Run("ping", func(t T) { checkPing(ctx, t, cfg) })
+
+	// Browser is optional (spec section 4), discovered by type assertion so a
+	// driver that cannot page a table is never forced to stub it.
+	br, ok := conn.(driver.Browser)
+	if !ok {
+		return
+	}
+	t.Run("paging", func(t T) {
+		for _, c := range pagingCases {
+			t.Run(c.name, func(t T) { checkPaging(ctx, t, br, database, c) })
+		}
+	})
+	t.Run("cursor", func(t T) { checkCursor(ctx, t, br, database) })
+	t.Run("empty_table", func(t T) { checkEmptyTable(ctx, t, br, database) })
+}
+
+func connect(ctx context.Context, t TestingT, cfg Config) driver.Conn {
+	t.Helper()
+	conn, err := cfg.Driver.Open(ctx, cfg.Open(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return conn
+}
+
+// seed creates the fixture tables and fills them, through Conn.Query — the
+// one way into a driver that takes a statement, and therefore the only way a
+// suite that knows no dialect can write anything at all.
+func seed(ctx context.Context, t TestingT, conn driver.Conn, ddl Fixtures) {
+	t.Helper()
+	for _, fx := range fixtures {
+		for _, stmt := range append([]string{ddl.create(fx.name)}, fx.insert()...) {
+			cur, err := conn.Query(ctx, stmt)
+			if err != nil {
+				t.Fatalf("seeding the fixtures, %q: %v", stmt, err)
+			}
+			_ = cur.Close()
+		}
+	}
+}
+
+// checkIntrospect is laziness, tier one: connecting reads the database list
+// and nothing below it.
+func checkIntrospect(t TestingT, d driver.Driver, cat *schema.Catalog) {
+	t.Helper()
+	for i, db := range cat.Databases {
+		if db.Name == "" {
+			t.Errorf("Introspect returned database %d with an empty name; "+
+				"every later call names a database, so an unnamed one is unreachable", i)
+		}
+		if db.Tables != nil {
+			t.Errorf("Introspect read database %q's table list eagerly (%d entries); "+
+				"tier one reads the database list ONLY — a server with forty schemas of two "+
+				"thousand tables makes connecting the slow call — so Tables must stay nil "+
+				"until Conn.Tables is called", db.Name, len(db.Tables))
+		}
+	}
+	if !d.Capabilities().MultipleDatabases && len(cat.Databases) > 1 {
+		t.Errorf("the driver reports Capabilities.MultipleDatabases=false but Introspect "+
+			"returned %d databases; the sidebar branches on that bit and draws tables "+
+			"directly under the connection when it is false, so every database after the "+
+			"first would be flattened into one unlabelled list", len(cat.Databases))
+	}
+}
+
+// checkTables is laziness, tier two, and the database argument being real.
+func checkTables(ctx context.Context, t TestingT, conn driver.Conn, cat *schema.Catalog, database string) {
+	t.Helper()
+	for _, db := range cat.Databases {
+		tables, err := conn.Tables(ctx, db.Name)
+		if !succeeded(t, err, "Tables(%q), a database Introspect itself reported", db.Name) {
+			continue
+		}
+		if tables == nil {
+			t.Errorf("Tables(%q) returned nil; a database with no tables must return a "+
+				"non-nil empty slice, because nil marshals to the JSON literal null and "+
+				"the shell declares an array", db.Name)
+			continue
+		}
+		for _, tbl := range tables {
+			if tbl.Columns != nil {
+				t.Errorf("Tables(%q) read table %q's columns eagerly (%d of them); "+
+					"tier two reads the table list only, and columns load on expand",
+					db.Name, tbl.Name, len(tbl.Columns))
+			}
+		}
+		if db.Name != database {
+			continue
+		}
+		for _, fx := range fixtures {
+			if !hasTable(tables, fx.name) {
+				t.Errorf("Tables(%q) did not list the seeded table %q; it returned %v",
+					db.Name, fx.name, tableNames(tables))
+			}
+		}
+	}
+
+	// The positive control for this rejection is the loop above: Tables
+	// answered for a database that exists, so refusing one that does not is
+	// the driver reading its argument rather than refusing everything.
+	_, err := conn.Tables(ctx, unknownDatabase)
+	refused(t, err, dberr.KindNotFound,
+		"Tables(%q), naming a database that does not exist", unknownDatabase)
+}
+
+func hasTable(tables []schema.Table, name string) bool {
+	for _, tbl := range tables {
+		if strings.EqualFold(tbl.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableNames(tables []schema.Table) []string {
+	out := make([]string, len(tables))
+	for i, tbl := range tables {
+		out[i] = tbl.Name
+	}
+	return out
+}
+
+// checkColumns is the third tier, read on expand.
+func checkColumns(ctx context.Context, t TestingT, conn driver.Conn, database string) {
+	t.Helper()
+	for _, fx := range fixtures {
+		cols, err := conn.Columns(ctx, database, fx.name)
+		if !succeeded(t, err, "Columns(%q, %q)", database, fx.name) {
+			continue
+		}
+		if len(cols) == 0 {
+			t.Errorf("Columns(%q, %q) returned no columns for a table the suite "+
+				"created with two", database, fx.name)
+			continue
+		}
+		for i, col := range cols {
+			if col.Name == "" {
+				t.Errorf("Columns(%q, %q) returned column %d with an empty name",
+					database, fx.name, i)
+			}
+		}
+	}
+
+	_, err := conn.Columns(ctx, database, unknownTable)
+	refused(t, err, dberr.KindNotFound,
+		"Columns(%q, %q), naming a table that does not exist", database, unknownTable)
+}
+
+// quoteProbe is quoted once to discover what this engine's quote character
+// is, so the round-trip below can be built out of the engine's OWN character
+// rather than a guess. SQLite doubles a double quote, MySQL a backtick.
+const quoteProbe = "lantern"
+
+// checkQuote asserts generated SQL never has to guess at quoting — including
+// for the identifier that is hardest to quote, one containing the quote
+// character itself.
+func checkQuote(ctx context.Context, t TestingT, conn driver.Conn) {
+	t.Helper()
+	quoted := conn.Quote(quoteProbe)
+	if quoted == quoteProbe {
+		t.Errorf("Quote(%q) returned it unchanged; an identifier that needs no escaping "+
+			"still needs delimiting, or a column named after a keyword is a syntax error",
+			quoteProbe)
+		return
+	}
+	mark, _ := utf8.DecodeRuneInString(quoted)
+	ident := quoteProbe + string(mark) + "id"
+
+	// An alias, because it needs no DDL and still proves the quoted form is
+	// SQL rather than a string the engine merely tolerates: the engine has to
+	// parse it as an identifier to name the column after it.
+	stmt := "SELECT 1 AS " + conn.Quote(ident)
+	cur, err := conn.Query(ctx, stmt)
+	if !succeeded(t, err, "the quoted form of %q is not usable in a statement (%s)", ident, stmt) {
+		return
+	}
+	defer func() { _ = cur.Close() }()
+	if cols := cur.Columns(); len(cols) != 1 || cols[0].Name != ident {
+		t.Errorf("Quote did not round-trip: %q rendered as %s came back as %v",
+			ident, stmt, columnNames(cur.Columns()))
+	}
+}
+
+func columnNames(cols []driver.ColumnMeta) []string {
+	out := make([]string, len(cols))
+	for i, col := range cols {
+		out[i] = col.Name
+	}
+	return out
+}
+
+// checkPing uses a connection of its own: it closes what it pings, and the
+// rest of the suite still needs the one it was given.
+func checkPing(ctx context.Context, t TestingT, cfg Config) {
+	t.Helper()
+	conn, err := cfg.Driver.Open(ctx, cfg.Open(t))
+	if !succeeded(t, err, "opening a second connection") {
+		return
+	}
+	succeeded(t, conn.Ping(ctx), "Ping on a connection that is open")
+	_ = conn.Close()
+	if conn.Ping(ctx) == nil {
+		t.Errorf("Ping succeeded after Close; a connection the UI has dropped would " +
+			"report itself healthy forever")
+	}
+}
+
+// checkPaging is the invariant the browse work exists for: a table walked to
+// exhaustion yields every row exactly once, at every page size.
+func checkPaging(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase) {
+	t.Helper()
+	fx, _ := fixtureNamed(c.table)
+	want := fx.keys()
+	for _, limit := range c.pages {
+		got, complete := walk(ctx, t, br, database, c, limit)
+		if !complete {
+			continue
+		}
+		if !sameMultiset(got, want) {
+			t.Errorf("walking %s returned %d keys %v; want every row exactly once, %v",
+				describe(c, limit), len(got), sorted(got), sorted(want))
+		}
+	}
+}
+
+// walk pages one table to exhaustion, echoing back whatever the previous page
+// handed it — a keyset when the driver paginated by key, an offset when it
+// could not — and returns the key of every row it saw.
+func walk(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase, limit int) ([]string, bool) {
+	t.Helper()
+	fx, _ := fixtureNamed(c.table)
+	what := describe(c, limit)
+	// A driver that never reports exhaustion must be stopped by something.
+	// One page per row is past generous: a correct driver needs ceil(n/limit).
+	budget := len(fx.rows) + 2
+
+	req := driver.BrowseRequest{Database: database, Table: c.table, Sort: c.sort, Limit: limit}
+	var got []string
+	for page := 1; ; page++ {
+		p, err := br.Browse(ctx, req)
+		if !succeeded(t, err, "walking %s", what) {
+			return got, false
+		}
+		if p == nil {
+			t.Errorf("walking %s returned a nil page and no error", what)
+			return got, false
+		}
+		at := columnIndex(p.Columns, KeyColumn)
+		if at < 0 || ragged(p.Rows, len(p.Columns)) {
+			t.Errorf("walking %s produced a page that has no usable %q column: "+
+				"columns %v, row widths %v", what, KeyColumn, columnNames(p.Columns), widths(p.Rows))
+			return got, false
+		}
+		if len(p.Rows) > limit {
+			t.Errorf("walking %s returned %d rows for a limit of %d; an unbounded page is "+
+				"how a UI bug becomes an out-of-memory crash", what, len(p.Rows), limit)
+			return got, false
+		}
+		for _, row := range p.Rows {
+			got = append(got, row[at].Text)
+		}
+		if len(p.Keyset) > 0 && p.SortToken == "" {
+			t.Errorf("walking %s issued a keyset with no sort token; the token is what "+
+				"tells a legitimate continuation from a cursor replayed under a sort that "+
+				"has since changed, and it is absent exactly when the keyset is", what)
+		}
+		if p.Exhausted {
+			return got, true
+		}
+		if page >= budget {
+			t.Errorf("walking %s did not terminate: still not exhausted after %d pages "+
+				"and %d rows", what, page, len(got))
+			return got, false
+		}
+		if len(p.Keyset) > 0 {
+			req.After, req.SortToken = p.Keyset, p.SortToken
+			continue
+		}
+		// No keyset: the driver paginated by offset and said so.
+		req.Offset = p.Offset
+	}
+}
+
+// checkCursor asserts a cursor is only honoured for the sort it was issued
+// under. Both halves are asserted against the SAME cursor, and the positive
+// control runs first: a driver that refused every replay would otherwise pass
+// two rejection checks while being unable to serve a second page at all.
+func checkCursor(ctx context.Context, t TestingT, br driver.Browser, database string) {
+	t.Helper()
+	first := driver.BrowseRequest{
+		Database: database, Table: TableTies, Sort: ascending, Limit: tieGroup,
+	}
+	p, err := br.Browse(ctx, first)
+	if !succeeded(t, err, "browsing %q for a cursor to replay", TableTies) {
+		return
+	}
+	if p == nil || len(p.Keyset) == 0 {
+		// No cursor was issued — this driver paged by offset, and there is
+		// nothing to replay under the wrong sort.
+		return
+	}
+
+	replay := first
+	replay.After, replay.SortToken = p.Keyset, p.SortToken
+	if _, err := br.Browse(ctx, replay); !succeeded(t, err,
+		"replaying a cursor under the very sort it was issued for") {
+		return
+	}
+
+	different := replay
+	different.Sort = descending
+	_, err = br.Browse(ctx, different)
+	refused(t, err, dberr.KindInvalid,
+		"a cursor issued for the sort %v and replayed under %v, a different sort of the same width",
+		ascending, descending)
+
+	untokened := replay
+	untokened.SortToken = ""
+	_, err = br.Browse(ctx, untokened)
+	refused(t, err, dberr.KindInvalid,
+		"a cursor replayed with no sort token alongside a non-empty After")
+}
+
+// checkEmptyTable is the shape an empty result has to keep. It is a JSON
+// assertion because the defect it guards against was one: Rows arriving as
+// null where the shell declares an array has blanked the whole app.
+func checkEmptyTable(ctx context.Context, t TestingT, br driver.Browser, database string) {
+	t.Helper()
+	p, err := br.Browse(ctx, driver.BrowseRequest{
+		Database: database, Table: TableEmpty, Limit: 10,
+	})
+	if !succeeded(t, err, "browsing the empty table %q", TableEmpty) {
+		return
+	}
+	// Marshalled before the nil check, deliberately: a nil page marshals to
+	// the literal null, which is exactly the failure this asserts against.
+	// json.Marshal cannot fail for a BrowsePage — every field is a string,
+	// a bool or an int — so its error is dropped rather than branched on.
+	if b, _ := json.Marshal(p); !bytes.Contains(b, []byte(`"rows":[]`)) {
+		t.Errorf("the page for the empty table %q marshalled as %s; Rows must cross the "+
+			"wire as [] and never as null", TableEmpty, b)
+	}
+	if p == nil {
+		return
+	}
+	if len(p.Columns) == 0 {
+		t.Errorf("browsing the empty table %q returned no columns; an empty table "+
+			"still has a shape, and the grid draws it", TableEmpty)
+	}
+	if len(p.Rows) != 0 {
+		t.Errorf("browsing the empty table %q returned %d rows; there are none to return",
+			TableEmpty, len(p.Rows))
+	}
+	if !p.Exhausted {
+		t.Errorf("browsing the empty table %q did not report Exhausted; a caller that "+
+			"keeps asking never stops", TableEmpty)
+	}
+}
+
+// succeeded reports a call the contract says must work, naming the call
+// rather than leaving a bare driver error to be interpreted.
+func succeeded(t TestingT, err error, format string, args ...any) bool {
+	t.Helper()
+	if err == nil {
+		return true
+	}
+	t.Errorf("%s: %v", fmt.Sprintf(format, args...), err)
+	return false
+}
+
+// refused reports a call the contract says must be rejected, and on what
+// terms.
+//
+// The Kind is asserted because the UI branches on it, but the Kind alone is
+// never the whole assertion: every caller of this pairs it with a positive
+// control — the same call, made legitimately, succeeding — because a driver
+// that refuses everything satisfies a Kind check while being useless, and a
+// test that cannot tell those apart passes for the wrong reason.
+func refused(t TestingT, err error, want dberr.Kind, format string, args ...any) {
+	t.Helper()
+	what := fmt.Sprintf(format, args...)
+	if err == nil {
+		t.Errorf("%s was accepted; the contract requires it be refused with kind %q", what, want)
+		return
+	}
+	if got := dberr.From(err).Kind; got != want {
+		t.Errorf("%s was refused with kind %q, want %q: %v", what, got, want, err)
+	}
+}
+
+func describe(c pagingCase, limit int) string {
+	return fmt.Sprintf("%q sorted by %s at a page size of %d", c.table, describeSort(c.sort), limit)
+}
+
+func describeSort(keys []driver.SortKey) string {
+	if len(keys) == 0 {
+		return "the driver's own default"
+	}
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k.Column + " ASC"
+		if k.Desc {
+			parts[i] = k.Column + " DESC"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func columnIndex(cols []driver.ColumnMeta, name string) int {
+	for i, col := range cols {
+		if strings.EqualFold(col.Name, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ragged reports whether any row disagrees with the page's own column count.
+func ragged(rows [][]driver.Value, n int) bool {
+	for _, row := range rows {
+		if len(row) != n {
+			return true
+		}
+	}
+	return false
+}
+
+func widths(rows [][]driver.Value) []int {
+	out := make([]int, len(rows))
+	for i, row := range rows {
+		out[i] = len(row)
+	}
+	return out
+}
+
+func sameMultiset(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	g, w := sorted(got), sorted(want)
+	for i := range g {
+		if g[i] != w[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sorted(ss []string) []string {
+	out := append([]string(nil), ss...)
+	sort.Strings(out)
+	return out
+}
