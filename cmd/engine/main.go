@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/marlexladag/lantern/internal/api"
 	"github.com/marlexladag/lantern/internal/engine/store"
@@ -32,9 +33,50 @@ var (
 	commit  = "none"
 )
 
+// sessionCloseTimeout bounds how long the signal-handling goroutine below
+// waits for closeSessionsOnSignal before exiting anyway. Short enough that a
+// hung driver Close cannot make the engine ignore SIGTERM/SIGINT for any
+// noticeable time, long enough that a real close (a SQLite handle flushing
+// and releasing its file lock, say) has every realistic chance to finish
+// first.
+const sessionCloseTimeout = 2 * time.Second
+
+// closeSessionsOnSignal closes every session still open in sess, bounded by
+// timeout so a hung Close cannot block the process from exiting. It is
+// deliberately not sess.CloseAll called inline: see the call site below for
+// why this call lacks the drain guarantee CloseAll's own doc comment
+// describes for main's ordinary `defer sess.CloseAll()`, and what that
+// costs.
+//
+// If timeout elapses before every Close returns, this returns anyway and
+// the goroutine still running sess.CloseAll is abandoned along with
+// whatever database handle it was closing — a leaked handle the OS reclaims
+// on process exit, traded deliberately against a process that refuses to
+// honour a termination signal, which is the entire reason the caller's
+// signal-watcher goroutine exists (see its own comment).
+func closeSessionsOnSignal(sess *api.Sessions, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		sess.CloseAll()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	path, err := store.DefaultPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
+		os.Exit(1)
+	}
+	st := store.New(path, store.OSKeyring())
+	sess := api.NewSessions()
 
 	// rpc.Serve only observes ctx cancellation between requests: a pending
 	// read on an idle stdin will not wake up on its own (this is documented
@@ -58,13 +100,26 @@ func main() {
 	// mid-flight — its response, if any, may not reach stdout. That handler
 	// is no longer hypothetical: session.open (internal/api/session.go)
 	// dials a real database connection and keeps it open for the life of
-	// the session, and every already-open session held in sess.conns is
-	// abandoned the same way, since main's own `defer sess.CloseAll()` below
-	// is skipped right along with everything else. This is a deliberate,
-	// already-accepted tradeoff, not an oversight — see sess.CloseAll's own
-	// comment for why: closing live SQLite handles on a signal is not worth
-	// reintroducing the shutdown hang the readiness work above removed, and
-	// the OS reclaims open file descriptors on process exit either way.
+	// the session. closeSessionsOnSignal below closes every session that is
+	// already fully registered in sess.conns at the moment of signal,
+	// bounded by sessionCloseTimeout so a hung Close cannot block this
+	// goroutine — and therefore the process — from exiting.
+	//
+	// This is deliberately weaker than main's own `defer sess.CloseAll()`
+	// further down: that defer only ever runs once rpc.Server.Serve has
+	// returned, which is only possible once Serve's own `defer wg.Wait()`
+	// has confirmed no dispatch — no session.open call included — is still
+	// in flight (see sess.CloseAll's own doc comment for why that matters).
+	// This goroutine cannot offer the same guarantee: Serve may never
+	// return on its own while stdin sits idle, so there is nothing for it
+	// to wait on before calling closeSessionsOnSignal. In the narrow window
+	// where a session.open call is between a successful dial and
+	// registering its connection (sess.add) — which spans that call's own
+	// Introspect — a signal landing in that instant can still leak that one
+	// connection, exactly the gap sess.CloseAll's own comment warns a
+	// drain-guarantee-free caller would reopen. Accepted deliberately: this
+	// closes every session that is not mid-open, which is a strict
+	// improvement over the previous behaviour of closing none of them.
 	//
 	// Note: this goroutine is not purely a signal-path mechanism. The
 	// deferred stop() below unconditionally cancels ctx (that's how
@@ -76,24 +131,19 @@ func main() {
 	// shutdown ordering here.
 	go func() {
 		<-ctx.Done()
+		closeSessionsOnSignal(sess, sessionCloseTimeout)
 		os.Exit(0)
 	}()
 
-	path, err := store.DefaultPath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "engine: %v\n", err)
-		os.Exit(1)
-	}
-	st := store.New(path, store.OSKeyring())
-	sess := api.NewSessions()
-	// Closed only on the stdin-EOF shutdown path below (this defer runs when
-	// Serve returns normally, unwinding main). The signal path a few lines
-	// up calls os.Exit(0) directly and therefore skips every deferred
-	// cleanup in this function, this one included — that is the same
-	// documented tradeoff as the wg.Wait() skip above, made for the same
-	// reason: closing live SQLite handles on a signal is not worth
-	// reintroducing the shutdown hang the readiness work above removed. The
-	// OS reclaims open file descriptors on process exit either way.
+	// Closed on the stdin-EOF shutdown path below (this defer runs when
+	// Serve returns normally, unwinding main). The signal path above calls
+	// os.Exit(0) directly and therefore also skips this defer, same as
+	// every other deferred cleanup in this function — but that no longer
+	// leaves every open session dangling: closeSessionsOnSignal, called
+	// just before os.Exit(0) above, already closed what it could. Calling
+	// sess.CloseAll a second time here would be harmless (it starts from an
+	// already-empty map after the first call) but never happens, since
+	// os.Exit(0) skips this defer entirely.
 	defer sess.CloseAll()
 
 	srv := rpc.NewServer()

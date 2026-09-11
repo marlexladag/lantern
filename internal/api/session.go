@@ -70,16 +70,26 @@ func (s *Sessions) remove(id string) (driver.Conn, bool) {
 // every connection closed while one is quietly still open with nothing left
 // that can ever reach it again.
 //
-// Today that can't happen only because of an invariant enforced entirely
-// outside this type: cmd/engine's `defer sess.CloseAll()` runs only after
-// rpc.Server.Serve has returned, and Serve's own `defer wg.Wait()` (see
-// server.go) guarantees every in-flight dispatch — every handler goroutine,
-// session.open's included — has already finished by the time Serve returns.
-// So by the time CloseAll ever runs in this codebase, there is no concurrent
-// add left to race. A future caller that invokes CloseAll without that same
-// drain guarantee upstream (e.g. from a hypothetical "restart" RPC method
-// that still has other requests in flight) would silently reintroduce this
-// window; this type does nothing on its own to stop that.
+// That holds for cmd/engine's `defer sess.CloseAll()` specifically, only
+// because of an invariant enforced entirely outside this type: that call
+// runs only after rpc.Server.Serve has returned, and Serve's own `defer
+// wg.Wait()` (see server.go) guarantees every in-flight dispatch — every
+// handler goroutine, session.open's included — has already finished by the
+// time Serve returns. So by the time *that* call runs, there is no
+// concurrent add left to race.
+//
+// cmd/engine also calls CloseAll a second way, from its signal-handling
+// goroutine, deliberately without this drain guarantee — Serve may never
+// return on its own while stdin sits idle, so there is nothing to wait on
+// there before calling it. See that goroutine's own comment in
+// cmd/engine/main.go for the narrow, timing-dependent gap this reopens (a
+// session.open call caught between a successful dial and sess.add at the
+// exact instant a signal arrives can still leak) and why it is an accepted
+// trade rather than an oversight. A future caller that invokes CloseAll
+// without either drain guarantee — the deferred one, or an explicit,
+// documented accepted trade like the signal path's — would silently
+// reintroduce this window with no such justification; this type does
+// nothing on its own to stop that.
 func (s *Sessions) CloseAll() {
 	s.mu.Lock()
 	conns := s.conns
