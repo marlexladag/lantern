@@ -115,16 +115,40 @@ a god-interface full of methods that half the drivers must stub out.
 type Driver interface {
     ID() string
     Capabilities() Capabilities
+    // RequiredFields reports which ConnConfig fields must be non-empty for
+    // this driver to have any chance of dialing. Checked at SAVE time, so a
+    // connection that can never work is never persisted. Adding a driver's
+    // requirements is implementing this method in that driver's package, not
+    // editing a shared condition in the API layer.
+    RequiredFields(cfg ConnConfig) []string
     Open(ctx context.Context, cfg ConnConfig) (Conn, error)
 }
 
 // Required of every driver.
 type Conn interface {
     Ping(ctx context.Context) error
+    // Introspect reads the database and table lists, but NOT columns.
     Introspect(ctx context.Context) (*schema.Catalog, error)
+    // Columns reads one table's columns, on expand. See Section 5.
+    Columns(ctx context.Context, database, table string) ([]schema.Column, error)
     Query(ctx context.Context, sql string, args ...any) (Cursor, error)
     Quote(ident string) string
     Close() error
+}
+
+// ConnConfig is everything needed to open one connection. Password is
+// runtime-only and never persisted here (Section 6).
+type ConnConfig struct {
+    Driver   string
+    Host     string
+    Port     int
+    User     string
+    Password string
+    Database string
+    File     string            // file-backed engines (SQLite)
+    Options  map[string]string // TLS and per-engine settings
+    ReadOnly bool              // see below
+    Dialer   DialFunc          // nil for a direct connection; SSH tunnelling later
 }
 
 // Optional capabilities.
@@ -134,7 +158,10 @@ type RowEditor  interface { ApplyChanges(ctx context.Context, cs *edit.ChangeSet
 
 type Cursor interface {
     Columns() []ColumnMeta
-    Next(ctx context.Context, n int) ([]Row, error) // returns io.EOF when exhausted
+    // Next returns up to n rows. It returns FEWER than n with a nil error
+    // when the result is exhausted — not io.EOF. A driver that has an EOF
+    // sentinel of its own swallows it.
+    Next(ctx context.Context, n int) ([]Row, error)
     Close() error
 }
 ```
@@ -157,6 +184,19 @@ to report returns an empty one and declares the absence through
 `Capabilities`; the UI reads capabilities, never an empty result, to decide
 whether to render a schema tree.
 
+`ReadOnly` is enforced **by the driver**, not by the UI. A read-only flag the
+shell merely draws as a lock icon is a safety mechanism the user believes in
+and the system does not implement, which is worse than no mechanism at all. A
+driver that cannot enforce read-only at the connection level must fail `Open`
+rather than accept the flag and ignore it. SQLite enforces it with `PRAGMA
+query_only`, which SQLite checks inside its own opcode dispatch. (Note for
+implementers: modernc.org/sqlite hardcodes `SQLITE_OPEN_READWRITE` at every
+open and silently ignores `mode=ro` in the DSN — its own test suite says so.)
+
+A write refused by a read-only connection reports `KindReadOnly`, never
+`KindConstraint`. They demand opposite things of the user — fix the row versus
+reconnect read-write — and the UI cannot offer either if they share a Kind.
+
 ## 5. Schema model
 
 One normalized catalog shared by every engine:
@@ -169,10 +209,30 @@ Each driver maps its native introspection into this shape (MySQL reads
 `information_schema`, SQLite reads `pragma`). The UI never sees engine-specific
 structures.
 
-**Introspection is lazy.** On connect, load only the database and table lists.
-Load columns, indexes, and foreign keys when a table is expanded.
-`information_schema` is slow on servers with thousands of tables, and an eager
-load would make connecting feel broken.
+**Introspection is lazy, in two tiers.** On connect, load only the DATABASE
+list. Load a database's table list when that database is expanded. Load
+columns, indexes and foreign keys when a table is expanded.
+
+```go
+Introspect(ctx)                 // databases only — the connect-time call
+Tables(ctx, database)           // one database's tables, on expand
+Columns(ctx, database, table)   // one table's columns, on expand
+```
+
+One tier is not enough. `information_schema` is slow on servers with thousands
+of tables, and a server with 40 databases holding 2,000 tables each makes
+`session.open` exactly the slow call this section exists to prevent — column
+laziness cannot help, because the cost is already paid before any table is
+expanded.
+
+*SQLite hides this: it has a single hardcoded `main`, so returning every table
+eagerly costs nothing and looks correct. The tables tier therefore lands with
+the MySQL driver, which is the first engine that cannot hide it — and before
+it, so MySQL is written against the split rather than forcing it.*
+
+The UI renders the database tier whenever `Capabilities.MultipleDatabases` is
+set. Flattening databases into one table list shows a user three identically
+named `users` rows from three schemas with nothing to tell them apart.
 
 ## 6. Connection storage and secrets
 
