@@ -51,7 +51,12 @@ type BrowseRequest struct {
 	// an added safety a driver may offer, not a new required pairing.
 	SortToken string `json:"sort_token,omitempty"`
 	// Offset is used only when the driver told the caller it could not
-	// paginate by key.
+	// paginate by key — that is, on a page that came back with an Offset and
+	// no Keyset. The two are ALTERNATIVES, so a driver that can page this
+	// request by key may refuse a non-zero Offset rather than accept one it
+	// will not apply: an offset silently ignored serves the first page again
+	// and says nothing, which is indistinguishable from the request the
+	// caller meant to make.
 	Offset int `json:"offset,omitempty"`
 	Limit  int `json:"limit"`
 }

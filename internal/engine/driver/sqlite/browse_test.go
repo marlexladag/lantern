@@ -1271,3 +1271,152 @@ func TestBrowseRefusesAKeysetHoldingTextThatIsNotUTF8(t *testing.T) {
 		t.Errorf("message = %q, which is the BLOB refusal's words; this is a different cause", got.Message)
 	}
 }
+
+// -- fix wave D-4: what the cursor is named after ------------------------
+
+// The separator reasoning sortToken used to rest on was only accidentally
+// sound. Fields were joined with a single NUL byte, and the argument for
+// that being unambiguous was that a NUL cannot appear in a SQLite
+// identifier — true, and unreachable through Browse, but the reasoning is
+// what a MySQL or Postgres copy of this function inherits, and those have
+// their own rules about what an identifier may hold.
+//
+// The collision is real and was executed: under a separator-only encoding,
+// table "a" sorted by a column named "b" ascending hashes identically to a
+// table literally named "a\0b\0a" with no sort. So the encoding is now
+// length-prefixed, which is injective for ANY field content and needs no
+// premise about what the fields can hold.
+func TestSortTokenCannotBeCollidedByMovingASeparator(t *testing.T) {
+	one := sortToken("main", "a", []orderTerm{{expr: "b"}})
+	two := sortToken("main", "a\x00b\x00a", nil)
+	if one == two {
+		t.Errorf("two different (table, sort) pairs hash to the same token %q", one)
+	}
+	// The same shape one field to the left, so the fix cannot be a special
+	// case for the table position.
+	three := sortToken("main", "x", []orderTerm{{expr: "y"}, {expr: "z"}})
+	four := sortToken("main", "x", []orderTerm{{expr: "y\x00a\x00z"}})
+	if three == four {
+		t.Errorf("two different order lists hash to the same token %q", three)
+	}
+}
+
+// The token folds in the database the REQUEST named, not this package's own
+// constant. SQLite has exactly one database, so the two are equivalent here
+// and no behaviour changes — but a driver copied from this one for an
+// engine that has many would hash every schema's tables identically, and
+// two same-named tables in different schemas would accept each other's
+// cursors. The bug would be introduced by the copy and invisible in the
+// original, which is the kind that ships.
+func TestSortTokenFoldsInTheDatabaseItWasIssuedFor(t *testing.T) {
+	order := []orderTerm{{expr: `"id"`}}
+	if sortToken("main", "t", order) == sortToken("reporting", "t", order) {
+		t.Error("the same table name in two databases produced the same token")
+	}
+}
+
+// SQLite resolves an identifier case-insensitively — columnNamed already
+// matches that way — so a cursor issued for `users` must keep working when
+// the caller spells the table `USERS`. It did not: the token hashed the
+// table name verbatim, so the continuation was refused as a cursor from a
+// different sort. A false refusal rather than corruption, but the caller
+// cannot tell those apart, and half of this driver folding case while the
+// other half does not is the kind of inconsistency that gets noticed as a
+// bug report rather than a defect.
+func TestBrowseContinuesACursorUnderADifferentlyCasedTableName(t *testing.T) {
+	b := browser(t, browseFixture(t, 6))
+	first, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	second, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "USERS", Limit: 2,
+		After: first.Keyset, SortToken: first.SortToken,
+	})
+	if err != nil {
+		t.Fatalf("a cursor for `users` was refused by `USERS`, which SQLite resolves identically: %v", err)
+	}
+	if got := texts(second.Rows, 0); len(got) != 2 || got[0] != "3" {
+		t.Errorf("page 2 = %v, want the two rows after id 2", got)
+	}
+}
+
+// The same rule one level up: SQLite's schema names are case-insensitive
+// too, so "MAIN" names the database this connection has open.
+func TestBrowseAcceptsTheDatabaseNameInAnyCase(t *testing.T) {
+	b := browser(t, browseFixture(t, 3))
+	if _, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "MAIN", Table: "users", Limit: 2,
+	}); err != nil {
+		t.Errorf("`MAIN` was refused: %v", err)
+	}
+}
+
+// A request may name no database at all: BrowseRequest.Database is
+// optional, and this driver has exactly one database to mean.
+func TestBrowseDefaultsToTheOnlyDatabaseWhenNoneIsNamed(t *testing.T) {
+	b := browser(t, browseFixture(t, 6))
+	first, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Table: "users", Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("a request naming no database was refused: %v", err)
+	}
+	// And the token it issues has to be the same one "main" would issue,
+	// or naming the database on the next page would break the cursor.
+	named, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2,
+		After: first.Keyset, SortToken: first.SortToken,
+	})
+	if err != nil {
+		t.Fatalf("a cursor issued with no database named was refused by `main`: %v", err)
+	}
+	if got := texts(named.Rows, 0); len(got) != 2 || got[0] != "3" {
+		t.Errorf("page 2 = %v, want the two rows after id 2", got)
+	}
+}
+
+// Offset on the keyset path used to be accepted and then ignored: a request
+// for `users` with Offset 4 returned the FIRST page and said nothing
+// (executed). A negative offset was already rejected, so the only
+// unhonoured value was a positive one — the one a caller is most likely to
+// have meant.
+//
+// Rejected rather than honoured, deliberately. Honouring it would mean
+// LIMIT/OFFSET on top of a keyset predicate, which is answerable but
+// answers a question nobody asked: the offset a caller holds came from an
+// offset-paged response, and replaying it against a keyset-paged table
+// would count from a boundary that response never described. The two
+// pagination modes are alternatives, and the driver says which one it used
+// — Keyset present or Offset present, never both. Refusing keeps that
+// promise symmetrical in both directions.
+func TestBrowseRejectsAnOffsetItCannotHonour(t *testing.T) {
+	b := browser(t, browseFixture(t, 10))
+	_, err := b.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "users", Limit: 2, Offset: 4,
+	})
+	if err == nil {
+		t.Fatal("an offset the keyset path cannot honour was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindInvalid, err)
+	}
+
+	// The offset path still honours it, which is the whole reason the field
+	// exists: a view has no key, so this is the only way to page it.
+	v := browseOn(t,
+		`CREATE TABLE source (id INTEGER PRIMARY KEY, label TEXT NOT NULL)`,
+		`INSERT INTO source VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e')`,
+		`CREATE VIEW labels AS SELECT id, label FROM source`)
+	page, err := v.Browse(context.Background(), driver.BrowseRequest{
+		Database: "main", Table: "labels", Limit: 2, Offset: 3,
+	})
+	if err != nil {
+		t.Fatalf("a view refused an offset: %v", err)
+	}
+	if got := texts(page.Rows, 0); len(got) != 2 || got[0] != "4" {
+		t.Errorf("offset 3 returned %v, want the rows from id 4", got)
+	}
+}

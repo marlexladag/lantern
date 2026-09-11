@@ -40,8 +40,21 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	// single database under the fixed name "main"). Naming anything else is
 	// therefore a caller error, and saying so beats silently serving main's
 	// table under another database's name.
-	if req.Database != "" && req.Database != databaseName {
+	//
+	// Folded, because SQLite resolves schema and table names
+	// case-insensitively and this driver has to resolve them the same way
+	// it resolves column names (see columnNamed). "MAIN" named the database
+	// this connection has open and was refused as missing.
+	database := foldIdent(req.Database)
+	if database != "" && database != databaseName {
 		return nil, dberr.New(dberr.KindNotFound, "no such database: "+req.Database)
+	}
+	// Defaulted HERE rather than left empty, so the token below names the
+	// same database whether or not the caller spelled it out: a cursor
+	// issued for an unnamed database has to survive a next request that
+	// names it, and vice versa.
+	if database == "" {
+		database = databaseName
 	}
 	// SQLite reads a negative OFFSET as zero rather than rejecting it, which
 	// would turn a caller's arithmetic slip into a page that serves the top of
@@ -64,6 +77,19 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	order, byKey, err := c.planOrder(ctx, req, cols)
 	if err != nil {
 		return nil, err
+	}
+	// An offset this page will not apply. Keyset and offset are
+	// ALTERNATIVES, and the driver says which one it used by which field
+	// it fills in — so a request that pairs a keyset-pagable table with an
+	// offset is asking for a position nothing ever described to it, and
+	// the offset a caller holds can only have come from an offset-paged
+	// response. Accepting it and serving the first page anyway, which is
+	// what used to happen, is the silent half of that: a negative offset
+	// was already refused, so the only unhonoured value was the positive
+	// one a caller is most likely to have meant.
+	if byKey && req.Offset != 0 {
+		return nil, dberr.New(dberr.KindInvalid,
+			"browse: this table pages by key; page with the cursor rather than an offset")
 	}
 
 	// The keyset columns are selected IN ADDITION to the table's real
@@ -119,7 +145,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: this cursor is missing the sort it was issued for; start again from the first page")
 		}
-		if req.SortToken != sortToken(req.Table, order) {
+		if req.SortToken != sortToken(database, req.Table, order) {
 			return nil, dberr.New(dberr.KindInvalid,
 				"browse: this cursor was issued for a different sort; start again from the first page")
 		}
@@ -216,7 +242,7 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 			keyset[i] = v
 		}
 		page.Keyset = keyset
-		page.SortToken = sortToken(req.Table, order)
+		page.SortToken = sortToken(database, req.Table, order)
 	}
 	return page, nil
 }
@@ -247,37 +273,79 @@ type orderTerm struct {
 // name and produce identical order terms, and a token that could not tell
 // them apart would let a cursor from one page the other.
 //
+// database is folded in for the same reason as table, and comes from the
+// REQUEST rather than from this package's databaseName constant. The two
+// are equivalent for SQLite, which has exactly one database — but a driver
+// copied from this one for an engine that has many would then hash every
+// schema's tables identically, and two same-named tables in different
+// schemas would accept each other's cursors. The defect would be
+// introduced by the copy and invisible in the original.
+//
 // crypto/sha256 is used here only for its collision resistance across the
 // handful of orderings one table can produce — this is a consistency check
 // against an accidental mismatch (the caller's own stale cursor), not a
 // security boundary, so the digest is truncated: nothing is lost by a
 // shorter token that a legitimate caller could still not have predicted, and
 // nothing would be gained by a longer one that only an adversary deliberately
-// searching for a collision would care about. A 0 byte separates every
-// field fed into the hash, so table "ab" with no sort columns cannot be
-// confused with table "a" sorted by a column named "b" — the two would
-// otherwise concatenate to the same bytes. The separator itself cannot
-// appear inside a field: table is caller text but only ever hashed, never
-// executed, and every order[i].expr is either c.Quote(column) or one of the
-// three fixed rowid spellings, none of which SQLite identifiers can spell
-// with an embedded NUL.
-func sortToken(table string, order []orderTerm) string {
+// searching for a collision would care about.
+//
+// Every field is LENGTH-PREFIXED rather than separated by a byte, so the
+// encoding is injective for any field content whatsoever. A separator has
+// to argue that it cannot appear inside a field, and the argument this
+// function used to make was both wrong and load-bearing: it claimed the
+// table name is "only ever hashed, never executed", when Browse quotes it
+// into the page query and hasRowid into the rowid probe. The separator
+// scheme was sound only because SQLite refuses a NUL in an identifier —
+// executed, table "a" sorted by a column "b" hashed identically to a table
+// named "a\0b\0a" with no sort — and that premise is exactly what a MySQL
+// or Postgres copy of this function would inherit without rechecking. A
+// length prefix needs no premise.
+func sortToken(database, table string, order []orderTerm) string {
 	var b strings.Builder
-	b.WriteString(databaseName)
-	b.WriteByte(0)
-	b.WriteString(table)
+	// Folded on the way in, not at the call site, so every caller of this
+	// function gets the case-insensitivity SQLite itself applies.
+	hashField(&b, foldIdent(database))
+	hashField(&b, foldIdent(table))
 	for _, t := range order {
-		b.WriteByte(0)
-		b.WriteString(t.expr)
-		b.WriteByte(0)
+		// expr is not folded: it is c.Quote(col.Name) built from the
+		// CATALOG's own spelling, or one of the three fixed rowid spellings,
+		// so it is already canonical however the caller spelled the column.
+		hashField(&b, t.expr)
 		if t.desc {
-			b.WriteByte('d')
+			hashField(&b, "desc")
 		} else {
-			b.WriteByte('a')
+			hashField(&b, "asc")
 		}
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// hashField writes one field of a token's input as its byte length, a
+// colon, and then the field. Reading it back is unambiguous — the length
+// says exactly how far the field runs — so no two different field sequences
+// can produce the same bytes, whatever the fields contain.
+func hashField(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
+}
+
+// foldIdent renders an identifier in the case SQLite compares it in.
+//
+// ASCII only, which is SQLite's own rule: its built-in identifier
+// comparison folds A-Z and leaves every other byte alone, so "Ä" and "ä"
+// name DIFFERENT tables there. strings.ToLower would fold them together and
+// let one table's cursor page the other — the opposite of the false
+// refusal this exists to fix, and a worse one, since it corrupts rather
+// than refuses.
+func foldIdent(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }
 
 // planOrder resolves the request's sort into a total ordering where it can,
