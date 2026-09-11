@@ -21,9 +21,11 @@ import (
 	"database/sql"
 	sqldriver "database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
@@ -472,8 +474,17 @@ func (d scriptedDriverImpl) Open(string) (sqldriver.Conn, error) { return d.conn
 // scriptedConnWith registers a one-off database/sql driver under a unique
 // name (sql.Register panics on a repeat, so every caller needs a name of
 // its own) and returns an engine *conn wrapping it.
+// scriptedDriverSeq keeps every sql.Register name unique for the life of the
+// test binary. sql.Register panics on a repeat name, and `go test -count=2`
+// runs each test twice in ONE process, so a fixed name collides with itself on
+// the second pass — which made this package unrunnable under -count>1, the
+// usual way to smoke out an order-dependent or state-leaking test. The caller's
+// name is kept as a prefix so a panic still says which fixture it came from.
+var scriptedDriverSeq atomic.Int64
+
 func scriptedConnWith(t *testing.T, name string, rows *scriptedRows) *conn {
 	t.Helper()
+	name = fmt.Sprintf("%s#%d", name, scriptedDriverSeq.Add(1))
 	sql.Register(name, scriptedDriverImpl{conn: &scriptedConn{rows: rows}})
 	db, err := sql.Open(name, "x")
 	if err != nil {

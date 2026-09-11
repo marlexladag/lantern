@@ -64,6 +64,15 @@ type spyConn struct {
 	abandon chan struct{}
 }
 
+// spyDriverSeq makes every registered spy driver id unique for the life of
+// the test binary. driver.Register panics on a repeat id — deliberately, so a
+// real duplicate is caught at startup rather than silently shadowing — and
+// `go test -count=2` runs each test twice in ONE process, so an id derived
+// only from the test name collides with itself on the second pass. That made
+// the whole package unrunnable under -count>1, which is how you would
+// normally smoke out an order-dependent or state-leaking test.
+var spyDriverSeq atomic.Int64
+
 // newSpyConn returns a conn whose Close returns immediately. Set block,
 // announces or awaits on the result to make it hang or rendezvous.
 func newSpyConn(t *testing.T) *spyConn {
@@ -144,7 +153,7 @@ func openSpySessions(t *testing.T, conns ...*spyConn) *api.Sessions {
 		t.Fatal("session.open is not registered")
 	}
 	for i, conn := range conns {
-		id := fmt.Sprintf("spy:%s#%d", t.Name(), i)
+		id := fmt.Sprintf("spy:%s#%d.%d", t.Name(), i, spyDriverSeq.Add(1))
 		driver.Register(spyDriver{id: id, conn: conn})
 		rec, err := st.Save(store.Saved{Name: fmt.Sprintf("fixture-%d", i), Driver: id, Color: "#3d7d55"}, "")
 		if err != nil {

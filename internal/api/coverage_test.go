@@ -17,11 +17,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
@@ -99,13 +101,22 @@ func (d fakeDriver) Open(context.Context, driver.ConnConfig) (driver.Conn, error
 
 var _ driver.Driver = fakeDriver{}
 
+// fakeDriverSeq makes every registered fake driver id unique for the life of
+// the test binary. driver.Register panics on a repeat id — deliberately, so a
+// real duplicate is caught at startup rather than silently shadowing — and
+// `go test -count=2` runs each test twice in ONE process, so an id derived
+// only from the test name collides with itself on the second pass. That made
+// the package unrunnable under -count>1, which is the usual way to smoke out
+// an order-dependent or state-leaking test.
+var fakeDriverSeq atomic.Int64
+
 // registerFakeDriver registers a fakeDriver under an id unique to the
 // calling test (driver.Register panics on a repeat id, and the registry has
 // no test-visible way to unregister from outside internal/engine/driver) and
 // returns that id.
 func registerFakeDriver(t *testing.T, conn *fakeConn, openErr error) string {
 	t.Helper()
-	id := "fake:" + t.Name()
+	id := fmt.Sprintf("fake:%s#%d", t.Name(), fakeDriverSeq.Add(1))
 	driver.Register(fakeDriver{id: id, conn: conn, openErr: openErr})
 	return id
 }
