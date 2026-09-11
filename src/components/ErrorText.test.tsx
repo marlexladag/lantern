@@ -70,11 +70,16 @@ it('is not itself an alert', () => {
  * for every Kind is not a branch, it is unconditional text that happens to be
  * right once.
  */
-it('tells a read_only failure what to do about it, without replacing the engine message', () => {
+it('tells a read_only failure what to do about it, without replacing or repeating the engine message', () => {
   render(
     <ErrorText
       description={{
         kind: 'read_only',
+        // The engine's real message for this Kind — the read_only row of
+        // classify's table in internal/engine/driver/sqlite/sqlite.go, not
+        // an invented stand-in. A hint rendered beside a message the engine
+        // never sends proves nothing about the pair a user actually sees,
+        // which is how the duplication below stayed invisible.
         message: 'the connection is read-only',
         native: 'attempt to write a readonly database',
       }}
@@ -84,8 +89,11 @@ it('tells a read_only failure what to do about it, without replacing the engine 
   // The engine still says what happened...
   expect(screen.getByText('the connection is read-only')).toBeDefined();
   // ...and the UI says what to do next: one toggle, named exactly as the
-  // dialog names it.
-  expect(screen.getByText(/production connection/i)).toBeDefined();
+  // dialog names it, and named ONCE. Naming the control is the UI's job
+  // (spec §11 — Kind is the contract, the hint is the UI's); while the
+  // engine's message named it too, the rendered output carried it twice in
+  // two different quote glyphs and nothing here was looking.
+  expect(screen.getAllByText(/production connection/i)).toHaveLength(1);
 });
 
 it('offers no hint for a constraint failure, whose fix is the data, not the connection', () => {

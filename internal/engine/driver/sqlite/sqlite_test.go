@@ -471,7 +471,20 @@ func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
 	if got.Kind != dberr.KindReadOnly {
 		t.Errorf("read-only rejection classified as %q, want %q", got.Kind, dberr.KindReadOnly)
 	}
-	t.Logf("read-only CREATE TABLE rejection classifies as Kind %q, Message %q", got.Kind, got.Message)
+	// The only row of classify's table that used to have no Message
+	// assertion — it was logged, not checked — which is exactly why the
+	// message could name a control in ConnectionDialog.tsx, and duplicate
+	// ErrorText's own read_only hint in the rendered output, with every gate
+	// green.
+	if got.Message != "the connection is read-only" {
+		t.Errorf("message = %q, want the engine-neutral phrase from classify's table", got.Message)
+	}
+	// Spec section 11: the engine says what happened in engine-neutral
+	// terms; which control fixes it is the UI's to know. A Message naming
+	// one couples this package to the vocabulary of a React component.
+	if strings.Contains(got.Message, "Production connection") {
+		t.Errorf("the engine names a UI control in its message: %q", got.Message)
+	}
 
 	cur2, err := rw.Query(context.Background(), "CREATE TABLE should_exist (id INTEGER PRIMARY KEY)")
 	if err != nil {

@@ -332,7 +332,7 @@ const (
 //	condition                                  Kind        Message
 //	result code SQLITE_CONSTRAINT              constraint  "the statement violates a constraint"
 //	result code SQLITE_CANTOPEN                not_found   "the database file could not be opened"
-//	result code SQLITE_READONLY                read_only   `the connection is read-only; untick "Production connection" to write to it`
+//	result code SQLITE_READONLY                read_only   "the connection is read-only"
 //	text has "syntax error" or "no such column" syntax     "the statement is not valid SQL"
 //	text has "no such table"                   not_found   "the table does not exist"
 //	otherwise                                  unknown     "the database reported an error"
@@ -346,11 +346,16 @@ const (
 // dberr.KindReadOnly's own doc comment for the full reasoning, and
 // TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds, which asserts
 // both Kinds on connections opened from the same fixture file so the two
-// cannot silently collapse back into one without the test failing. The
-// Message names the concrete next action (untick "Production connection",
-// the exact toggle in src/components/ConnectionDialog.tsx) rather than just
-// describing the failure, since "the statement failed" would leave the user
-// no more informed than Native already makes them.
+// cannot silently collapse back into one without the test failing.
+//
+// The Message describes the connection's state and names no control. The
+// Kind is the contract here, and what to do about it is the UI's half of
+// it: src/components/ErrorText.tsx keeps a KIND_HINTS map and renders
+// "Untick Production connection…" beside this message for exactly this
+// Kind. A Message that named the toggle too would couple this package to
+// the vocabulary of a React component (spec section 11's engine
+// neutrality), and the user would read the same instruction twice, in two
+// different quote glyphs, in one error panel — which is what happened.
 //
 // modernc.org/sqlite enables extended result codes on every connection it
 // opens (see its newConn) and exposes them through its own *sqlite.Error via
@@ -389,7 +394,7 @@ func classify(err error, stmt string) error {
 		case sqliteResultCantOpen:
 			kind, message = dberr.KindNotFound, "the database file could not be opened"
 		case sqliteResultReadOnly:
-			kind, message = dberr.KindReadOnly, `the connection is read-only; untick "Production connection" to write to it`
+			kind, message = dberr.KindReadOnly, "the connection is read-only"
 		}
 	}
 
