@@ -6,9 +6,18 @@
  */
 import { request } from './engine';
 
-/** The engine's error classification. The UI branches on this (spec §11). */
+/**
+ * The engine's error classification. The UI branches on this (spec §11).
+ *
+ * One member per `Kind` constant in internal/engine/dberr/dberr.go, in the
+ * same order. `read_only` is a write refused because the connection itself
+ * is read-only — deliberately not `constraint`, which means the data broke a
+ * UNIQUE/FK/CHECK rule: opposite user actions, and the UI has to tell them
+ * apart. connections.test.ts checks this list against the Go one by parsing
+ * both, rather than by eye.
+ */
 export type DbErrorKind =
-  | 'auth' | 'network' | 'syntax' | 'constraint' | 'timeout'
+  | 'auth' | 'network' | 'syntax' | 'constraint' | 'read_only' | 'timeout'
   | 'canceled' | 'not_found' | 'unsupported' | 'invalid' | 'unknown';
 
 /** A database failure in engine-neutral terms. */

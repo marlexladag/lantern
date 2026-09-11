@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+// Read as text, not imported as modules: this test's whole job is to compare
+// two declarations that live on opposite sides of the IPC seam and cannot
+// import each other.
+import goSource from '../../internal/engine/dberr/dberr.go?raw';
+import tsSource from './connections.ts?raw';
 
 vi.mock('./engine', async () => {
   const actual = await vi.importActual<typeof import('./engine')>('./engine');
@@ -105,5 +110,41 @@ describe('asDbError', () => {
     });
     expect(got?.native).toBe('near "SELCT"');
     expect(got?.query).toBe('SELCT 1');
+  });
+});
+
+/*
+ * The Kind taxonomy is one contract with two declarations — Go's constants in
+ * internal/engine/dberr and the DbErrorKind union here — and nothing at build
+ * time links them. It was previously verified by a reviewer reading both
+ * lists side by side, which is a check that works exactly once.
+ *
+ * Both sides are parsed out of their own source here. Hardcoding the list in
+ * the test would prove nothing: it would be the same mistake written a third
+ * time, and it would agree with whichever side was wrong.
+ */
+describe('the DbErrorKind union and the engine`s Kind constants', () => {
+  /** `KindReadOnly Kind = "read_only"` in the const block. */
+  function goKinds(): string[] {
+    return [...goSource.matchAll(/^\s*Kind\w+\s+Kind\s*=\s*"([^"]+)"/gm)].map((m) => m[1]);
+  }
+
+  /** The string literals in this file's own `export type DbErrorKind` declaration. */
+  function tsKinds(): string[] {
+    const declaration = /export type DbErrorKind =([\s\S]*?);/.exec(tsSource);
+    expect(declaration, 'DbErrorKind declaration not found in connections.ts').not.toBeNull();
+    return [...declaration![1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  }
+
+  // Two empty lists compare equal, so a regex that has quietly stopped
+  // matching would make the real assertion below pass while checking nothing.
+  it('finds both declarations to compare', () => {
+    expect(goKinds().length).toBeGreaterThan(5);
+    expect(tsKinds().length).toBe(goKinds().length);
+    expect(tsKinds()).toContain('read_only');
+  });
+
+  it('contains exactly the same set of kinds as the Go engine', () => {
+    expect([...tsKinds()].sort()).toEqual([...goKinds()].sort());
   });
 });
