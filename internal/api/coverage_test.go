@@ -60,6 +60,10 @@ func (c *fakeConn) Introspect(context.Context) (*schema.Catalog, error) {
 	return &schema.Catalog{}, nil
 }
 
+func (c *fakeConn) Tables(context.Context, string) ([]schema.Table, error) {
+	return nil, errors.New("fakeConn: Tables not implemented")
+}
+
 func (c *fakeConn) Columns(context.Context, string, string) ([]schema.Column, error) {
 	return nil, errors.New("fakeConn: Columns not implemented")
 }

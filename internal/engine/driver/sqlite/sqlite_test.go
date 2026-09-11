@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,6 +57,109 @@ func open(t *testing.T, path string) driver.Conn {
 	return c
 }
 
+// connWith opens a fresh, empty SQLite file and runs each statement against
+// it in turn, returning the live connection. Unlike fixture, it bakes in no
+// schema of its own — every test using it states exactly the tables and
+// views it needs.
+func connWith(t *testing.T, stmts ...string) driver.Conn {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "connwith.db")
+	// Open refuses a file that does not exist yet, so seed an empty one —
+	// the same zero-byte-file trick TestIntrospectOnAnEmptyDatabase... uses
+	// above, and a valid empty SQLite database in its own right.
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed empty file: %v", err)
+	}
+	c := open(t, path)
+	for _, s := range stmts {
+		cur, err := c.Query(context.Background(), s)
+		if err != nil {
+			t.Fatalf("connWith stmt %q: %v", s, err)
+		}
+		cur.Close()
+	}
+	return c
+}
+
+func TestIntrospectReturnsDatabasesWithoutTables(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY)`, `CREATE TABLE b (id INTEGER PRIMARY KEY)`)
+	cat, err := c.Introspect(context.Background())
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	if len(cat.Databases) != 1 || cat.Databases[0].Name != "main" {
+		t.Fatalf("databases = %+v, want exactly main", cat.Databases)
+	}
+	// The whole point of the tier: connecting must not read the table list.
+	if cat.Databases[0].Tables != nil {
+		t.Errorf("Introspect read the table list eagerly: %+v", cat.Databases[0].Tables)
+	}
+}
+
+func TestTablesReadsOneDatabasesTables(t *testing.T) {
+	c := connWith(t,
+		`CREATE TABLE a (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE b (id INTEGER PRIMARY KEY)`,
+		`CREATE VIEW v AS SELECT id FROM a`,
+	)
+	got, err := c.Tables(context.Background(), "main")
+	if err != nil {
+		t.Fatalf("tables: %v", err)
+	}
+	var names []string
+	for _, tb := range got {
+		names = append(names, tb.Name+":"+string(tb.Kind))
+	}
+	want := []string{"a:table", "b:table", "v:view"}
+	if !slices.Equal(names, want) {
+		t.Errorf("tables = %v, want %v", names, want)
+	}
+	// Columns stay unread: that is the third tier, and this is the second.
+	for _, tb := range got {
+		if tb.Columns != nil {
+			t.Errorf("%s arrived with columns already read", tb.Name)
+		}
+	}
+}
+
+// Adversarial: a database with no user tables must return an EMPTY slice, not
+// nil. A nil slice marshals to the JSON literal null, the TypeScript side
+// declares an array, and that combination blanked the whole window once.
+func TestTablesOnAnEmptyDatabaseReturnsAnEmptySlice(t *testing.T) {
+	c := connWith(t)
+	got, err := c.Tables(context.Background(), "main")
+	if err != nil {
+		t.Fatalf("tables: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nil slice; it will marshal to null and blank the sidebar")
+	}
+	if len(got) != 0 {
+		t.Errorf("tables = %+v, want none", got)
+	}
+	raw, err := json.Marshal(map[string]any{"tables": got})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"tables":[]`) {
+		t.Errorf("marshalled as %s, want an empty array", raw)
+	}
+}
+
+// Adversarial: an unknown database must be refused rather than silently
+// returning main's tables, which is what a driver that ignores the parameter
+// would do. SQLite ignores it today and no test anywhere would notice.
+func TestTablesRejectsAnUnknownDatabase(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY)`)
+	_, err := c.Tables(context.Background(), "nonesuch")
+	if err == nil {
+		t.Fatal("an unknown database was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindNotFound {
+		t.Errorf("kind = %q, want not_found", got.Kind)
+	}
+}
+
 func TestPingSucceedsOnARealFile(t *testing.T) {
 	if err := open(t, fixture(t)).Ping(context.Background()); err != nil {
 		t.Fatalf("ping: %v", err)
@@ -75,16 +179,12 @@ func TestOpenReportsAMissingFileAsNotFound(t *testing.T) {
 	}
 }
 
-// Introspect lists tables and views but must NOT read columns — that is lazy.
-func TestIntrospectListsTablesAndViewsWithoutColumns(t *testing.T) {
-	cat, err := open(t, fixture(t)).Introspect(context.Background())
+// Tables lists tables and views but must NOT read columns — that is the
+// third tier.
+func TestTablesListsTablesAndViewsWithoutColumns(t *testing.T) {
+	tables, err := open(t, fixture(t)).Tables(context.Background(), "main")
 	if err != nil {
-		t.Fatalf("introspect: %v", err)
-	}
-
-	db, ok := cat.Database("main")
-	if !ok {
-		t.Fatalf("no database named main in %+v", cat)
+		t.Fatalf("tables: %v", err)
 	}
 
 	want := map[string]schema.TableKind{
@@ -92,27 +192,26 @@ func TestIntrospectListsTablesAndViewsWithoutColumns(t *testing.T) {
 		"orders":       schema.TableKindTable,
 		"active_users": schema.TableKindView,
 	}
-	if len(db.Tables) != len(want) {
-		t.Fatalf("got %d tables, want %d: %+v", len(db.Tables), len(want), db.Tables)
+	if len(tables) != len(want) {
+		t.Fatalf("got %d tables, want %d: %+v", len(tables), len(want), tables)
 	}
-	for _, tbl := range db.Tables {
+	for _, tbl := range tables {
 		if tbl.Kind != want[tbl.Name] {
 			t.Errorf("%s kind = %q, want %q", tbl.Name, tbl.Kind, want[tbl.Name])
 		}
 		if tbl.Loaded() {
-			t.Errorf("%s reported Loaded — introspection must not read columns", tbl.Name)
+			t.Errorf("%s reported Loaded — table listing must not read columns", tbl.Name)
 		}
 	}
 }
 
 // SQLite's own bookkeeping tables must not appear in the tree.
-func TestIntrospectHidesInternalTables(t *testing.T) {
-	cat, err := open(t, fixture(t)).Introspect(context.Background())
+func TestTablesHidesInternalTables(t *testing.T) {
+	tables, err := open(t, fixture(t)).Tables(context.Background(), "main")
 	if err != nil {
-		t.Fatalf("introspect: %v", err)
+		t.Fatalf("tables: %v", err)
 	}
-	db, _ := cat.Database("main")
-	for _, tbl := range db.Tables {
+	for _, tbl := range tables {
 		if len(tbl.Name) >= 7 && tbl.Name[:7] == "sqlite_" {
 			t.Errorf("internal table %q leaked into the catalog", tbl.Name)
 		}
@@ -246,43 +345,14 @@ func TestRequiredFieldsIsSatisfiedWhenFileIsSet(t *testing.T) {
 	}
 }
 
-// Coordinator-flagged: a database with zero user tables must marshal
-// "tables":[], not "tables":null. The TypeScript side declares tables:
-// Table[] and calls .map on it while rendering the sidebar, which throws on
-// null. Asserting on the marshalled bytes rather than the struct is
-// deliberate — the struct was never the thing that broke; a nil slice and an
-// empty non-nil slice are indistinguishable by reflection-based struct
-// comparison but marshal to different wire output, and it's the wire output
-// the UI actually consumes.
-func TestIntrospectOnAnEmptyDatabaseMarshalsTablesAsAnEmptyArray(t *testing.T) {
-	// A zero-byte file is itself a valid, empty SQLite database — exactly
-	// the shape of a brand-new .db the user has not put anything in yet.
-	path := filepath.Join(t.TempDir(), "empty.db")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatalf("seed empty file: %v", err)
-	}
-
-	cat, err := open(t, path).Introspect(context.Background())
-	if err != nil {
-		t.Fatalf("introspect: %v", err)
-	}
-	raw, err := json.Marshal(cat)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if !strings.Contains(string(raw), `"tables":[]`) {
-		t.Errorf("marshalled catalog = %s, want it to contain \"tables\":[]", raw)
-	}
-}
-
 // A database whose only table is sqlite_sequence (left behind once an
-// AUTOINCREMENT table is created and then dropped) must also introspect to
-// an empty, non-nil Tables — introspectSQL's own `NOT LIKE 'sqlite_%'` filter
-// hides it, and this is the case where the query's WHERE clause alone,
-// without this fix, would still leave Tables nil.
-func TestIntrospectOnADatabaseWithOnlySqliteSequenceMarshalsTablesAsAnEmptyArray(t *testing.T) {
+// AUTOINCREMENT table is created and then dropped) must also list to an
+// empty, non-nil slice — tablesSQL's own `NOT LIKE 'sqlite_%'` filter hides
+// it, and this is the case where the query's WHERE clause alone, without
+// the explicit non-nil initialisation, would still leave the result nil.
+func TestTablesOnADatabaseWithOnlySqliteSequenceReturnsAnEmptySlice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seq-only.db")
-	db, err := sql.Open("sqlite", path)
+	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
@@ -291,24 +361,23 @@ func TestIntrospectOnADatabaseWithOnlySqliteSequenceMarshalsTablesAsAnEmptyArray
 		"INSERT INTO t DEFAULT VALUES",
 		"DROP TABLE t",
 	} {
-		if _, err := db.Exec(stmt); err != nil {
+		if _, err := raw.Exec(stmt); err != nil {
 			t.Fatalf("fixture stmt %q: %v", stmt, err)
 		}
 	}
-	if err := db.Close(); err != nil {
+	if err := raw.Close(); err != nil {
 		t.Fatalf("close fixture: %v", err)
 	}
 
-	cat, err := open(t, path).Introspect(context.Background())
+	tables, err := open(t, path).Tables(context.Background(), "main")
 	if err != nil {
-		t.Fatalf("introspect: %v", err)
+		t.Fatalf("tables: %v", err)
 	}
-	raw, err := json.Marshal(cat)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	if tables == nil {
+		t.Fatal("nil slice; it will marshal to null and blank the sidebar")
 	}
-	if !strings.Contains(string(raw), `"tables":[]`) {
-		t.Errorf("marshalled catalog = %s, want it to contain \"tables\":[]", raw)
+	if len(tables) != 0 {
+		t.Errorf("tables = %+v, want none — sqlite_sequence must stay hidden", tables)
 	}
 }
 
@@ -492,11 +561,11 @@ func TestReadOnlyConnectionRejectsWritesWhileReadWriteSucceeds(t *testing.T) {
 	}
 	cur2.Close()
 
-	cat, err := rw.Introspect(context.Background())
+	tables, err := rw.Tables(context.Background(), "main")
 	if err != nil {
-		t.Fatalf("introspect: %v", err)
+		t.Fatalf("tables: %v", err)
 	}
-	db, _ := cat.Database("main")
+	db := schema.Database{Tables: tables}
 	if _, ok := db.Table("should_exist"); !ok {
 		t.Error("the read-write CREATE TABLE did not actually take effect")
 	}
@@ -559,11 +628,11 @@ func openReadOnly(t *testing.T, path string) driver.Conn {
 // the write never happened.
 func tableExists(t *testing.T, path, table string) bool {
 	t.Helper()
-	cat, err := open(t, path).Introspect(context.Background())
+	tables, err := open(t, path).Tables(context.Background(), "main")
 	if err != nil {
-		t.Fatalf("introspect: %v", err)
+		t.Fatalf("tables: %v", err)
 	}
-	db, _ := cat.Database("main")
+	db := schema.Database{Tables: tables}
 	_, ok := db.Table(table)
 	return ok
 }

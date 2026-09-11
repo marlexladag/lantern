@@ -64,9 +64,22 @@ type ConnConfig struct {
 // Conn is a live connection. Every driver implements exactly this.
 type Conn interface {
 	Ping(ctx context.Context) error
-	// Introspect reads the database and table lists, but NOT columns —
-	// introspection is lazy (spec section 5).
+	// Introspect reads the DATABASE list only. It does NOT read table lists:
+	// spec section 5 draws laziness in two tiers because a server with forty
+	// schemas of two thousand tables makes connecting the slow call, and no
+	// amount of column laziness helps once that cost is already paid.
+	//
+	// Databases arrive with Tables nil, which schema.Table.Loaded() reads as
+	// "not read yet" — distinct from a non-nil empty slice, which means "read,
+	// and there are none".
 	Introspect(ctx context.Context) (*schema.Catalog, error)
+	// Tables reads one database's tables, when that database is expanded.
+	// It returns a non-nil empty slice for a database with no tables, never
+	// nil: nil marshals to the JSON literal null, and the shell declares an
+	// array. An unknown database is an error, not an empty result — a driver
+	// that ignores this parameter and returns its only database's tables
+	// would otherwise pass every test a single-database engine can write.
+	Tables(ctx context.Context, database string) ([]schema.Table, error)
 	// Columns reads one table's columns, on expand.
 	Columns(ctx context.Context, database, table string) ([]schema.Column, error)
 	Query(ctx context.Context, sql string, args ...any) (Cursor, error)

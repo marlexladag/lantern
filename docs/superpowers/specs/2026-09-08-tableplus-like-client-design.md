@@ -173,11 +173,6 @@ type Cursor interface {
 databases, editable results, explain plans. Redis will report almost nothing
 and the UI will adapt rather than crash.
 
-*As built today `Introspect` returns databases AND tables in one call, and
-`Tables` does not exist. SQLite has a single hardcoded `main`, so the two tiers
-are indistinguishable there. The split lands with the MySQL driver, which is
-the first engine that cannot hide it — see Section 5.*
-
 `Quote` exists because identifier quoting differs per engine (backtick,
 double-quote, bracket) and generated SQL in `edit/` must never guess.
 
@@ -250,11 +245,6 @@ of tables, and a server with 40 databases holding 2,000 tables each makes
 `session.open` exactly the slow call this section exists to prevent — column
 laziness cannot help, because the cost is already paid before any table is
 expanded.
-
-*SQLite hides this: it has a single hardcoded `main`, so returning every table
-eagerly costs nothing and looks correct. The tables tier therefore lands with
-the MySQL driver, which is the first engine that cannot hide it — and before
-it, so MySQL is written against the split rather than forcing it.*
 
 The UI renders the database tier whenever `Capabilities.MultipleDatabases` is
 set. Flattening databases into one table list shows a user three identically

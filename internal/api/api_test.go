@@ -150,7 +150,10 @@ func TestTestConnectionReportsFailureAsAResultNotAnError(t *testing.T) {
 	}
 }
 
-func TestOpenReturnsASessionAndTheCatalog(t *testing.T) {
+// session.open reads the DATABASE list only, per the two-tier split in
+// driver.Conn.Introspect's doc comment: a database's tables are read only
+// when it is expanded (session.tables, a later RPC), never eagerly here.
+func TestOpenReturnsASessionAndTheDatabaseListWithoutTables(t *testing.T) {
 	h := newHarness(t)
 	saved, _ := h.call(t, "connections.save", map[string]any{
 		"connection": map[string]any{"name": "fixture", "driver": "sqlite", "file": h.db, "color": "#3d7d55"},
@@ -167,11 +170,8 @@ func TestOpenReturnsASessionAndTheCatalog(t *testing.T) {
 		SessionID string `json:"session_id"`
 		Catalog   struct {
 			Databases []struct {
-				Name   string `json:"name"`
-				Tables []struct {
-					Name    string          `json:"name"`
-					Columns json.RawMessage `json:"columns"`
-				} `json:"tables"`
+				Name   string          `json:"name"`
+				Tables json.RawMessage `json:"tables"`
 			} `json:"databases"`
 		} `json:"catalog"`
 	}
@@ -181,15 +181,13 @@ func TestOpenReturnsASessionAndTheCatalog(t *testing.T) {
 	if res.SessionID == "" {
 		t.Fatal("no session id")
 	}
-	if len(res.Catalog.Databases) != 1 || len(res.Catalog.Databases[0].Tables) != 1 {
+	if len(res.Catalog.Databases) != 1 || res.Catalog.Databases[0].Name != "main" {
 		t.Fatalf("catalog = %+v", res.Catalog)
 	}
-	if res.Catalog.Databases[0].Tables[0].Name != "users" {
-		t.Errorf("table = %q, want users", res.Catalog.Databases[0].Tables[0].Name)
-	}
-	// Lazy: open must not have read columns.
-	if res.Catalog.Databases[0].Tables[0].Columns != nil {
-		t.Errorf("open read columns eagerly: %s", res.Catalog.Databases[0].Tables[0].Columns)
+	// The whole point of the tier: session.open must not have read the table
+	// list at all, so the wire value is the JSON literal null, not [].
+	if string(res.Catalog.Databases[0].Tables) != "null" {
+		t.Errorf("session.open read the table list eagerly: %s", res.Catalog.Databases[0].Tables)
 	}
 }
 

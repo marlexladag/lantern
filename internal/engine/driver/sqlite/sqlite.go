@@ -151,41 +151,46 @@ func (c *conn) Quote(ident string) string {
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
 
-const introspectSQL = `SELECT name, type FROM sqlite_master
+func (c *conn) Introspect(ctx context.Context) (*schema.Catalog, error) {
+	// SQLite has exactly one database per connection, named at attach time;
+	// this driver never attaches, so there is exactly one and it is always
+	// called "main". No query is needed, which is what the two-tier split is
+	// worth here: connecting reads nothing at all.
+	return &schema.Catalog{Databases: []schema.Database{{Name: databaseName}}}, nil
+}
+
+const tablesSQL = `SELECT name, type FROM sqlite_master
 WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
 ORDER BY name`
 
-func (c *conn) Introspect(ctx context.Context) (*schema.Catalog, error) {
-	rows, err := c.db.QueryContext(ctx, introspectSQL)
+func (c *conn) Tables(ctx context.Context, database string) ([]schema.Table, error) {
+	if !strings.EqualFold(database, databaseName) {
+		return nil, dberr.New(dberr.KindNotFound, "no database named "+database)
+	}
+	rows, err := c.db.QueryContext(ctx, tablesSQL)
 	if err != nil {
-		return nil, classify(err, introspectSQL)
+		return nil, classify(err, tablesSQL)
 	}
 	defer rows.Close()
 
-	// Tables starts as a non-nil empty slice, not nil: a database can
-	// legitimately have zero user tables (a brand-new .db, or one holding
-	// only sqlite_* tables, which the WHERE clause above filters out), and
-	// schema.Database.Tables has no omitempty tag — a nil slice would
-	// marshal as "tables":null, which the UI's `tables: Table[]` and its
-	// `.map` over that array cannot tolerate. Mirrors the same reasoning
-	// Columns below and store.Store.List use for their own result slices.
-	db := schema.Database{Name: databaseName, Tables: []schema.Table{}}
+	// Non-nil so an empty database marshals as [] rather than null.
+	out := []schema.Table{}
 	for rows.Next() {
 		var name, kind string
 		if err := rows.Scan(&name, &kind); err != nil {
-			return nil, classify(err, introspectSQL)
+			return nil, classify(err, tablesSQL)
 		}
 		t := schema.Table{Name: name, Kind: schema.TableKindTable}
 		if kind == "view" {
 			t.Kind = schema.TableKindView
 		}
-		// Columns stays nil: introspection is lazy (spec section 5).
-		db.Tables = append(db.Tables, t)
+		// Columns stays nil: that is the third tier (see Conn.Columns).
+		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, classify(err, introspectSQL)
+		return nil, classify(err, tablesSQL)
 	}
-	return &schema.Catalog{Databases: []schema.Database{db}}, nil
+	return out, nil
 }
 
 func (c *conn) Columns(ctx context.Context, database, table string) ([]schema.Column, error) {

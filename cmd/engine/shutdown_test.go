@@ -88,6 +88,10 @@ func (c *spyConn) Introspect(context.Context) (*schema.Catalog, error) {
 	return &schema.Catalog{Databases: []schema.Database{{Name: "main", Tables: []schema.Table{}}}}, nil
 }
 
+func (c *spyConn) Tables(context.Context, string) ([]schema.Table, error) {
+	return nil, errors.New("spyConn: Tables not implemented")
+}
+
 func (c *spyConn) Columns(context.Context, string, string) ([]schema.Column, error) {
 	return nil, errors.New("spyConn: Columns not implemented")
 }

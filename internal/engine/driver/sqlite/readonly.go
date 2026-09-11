@@ -27,7 +27,7 @@ import (
 //     a setting — a per-SQLite-version list whose omissions would be silent
 //     holes. Refusing all of them costs a user the ability to type an
 //     introspection pragma into a read-only query tab; this driver's own
-//     introspection (Introspect, Columns) issues its PRAGMAs against c.db
+//     introspection (Tables, Columns) issues its queries against c.db
 //     directly and is unaffected. A future caller that routes user SQL
 //     through anything but Conn.Query reopens the hole this closes.
 //   - More than one statement in a single call, which is how a write rides

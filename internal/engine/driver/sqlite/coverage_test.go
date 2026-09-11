@@ -95,14 +95,18 @@ func TestPingAfterCloseReportsUnknown(t *testing.T) {
 	}
 }
 
-func TestIntrospectAfterCloseFails(t *testing.T) {
+// Introspect no longer touches c.db at all — the two-tier split means
+// connecting reads nothing — so it has no closed-connection failure mode of
+// its own left to cover; this test covers the query that used to live in
+// Introspect's body and now lives in Tables instead.
+func TestTablesAfterCloseFails(t *testing.T) {
 	c := open(t, fixture(t))
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	_, err := c.Introspect(context.Background())
+	_, err := c.Tables(context.Background(), "main")
 	if err == nil {
-		t.Fatal("introspect on a closed connection succeeded")
+		t.Fatal("tables on a closed connection succeeded")
 	}
 	if got := dberr.From(err); got.Kind != dberr.KindUnknown {
 		t.Errorf("kind = %q, want %q (err: %v)", got.Kind, dberr.KindUnknown, err)
@@ -499,23 +503,26 @@ func scriptedConnWith(t *testing.T, name string, rows *scriptedRows) *conn {
 	return &conn{db: db}
 }
 
-func TestIntrospectReportsAScanError(t *testing.T) {
-	c := scriptedConnWith(t, "scripted-introspect-scan", &scriptedRows{
+// Introspect issues no query of its own any more, so the scan- and
+// rows-error branches these two tests used to cover for it now live in
+// Tables instead, and are covered here in the same shape.
+func TestTablesReportsAScanError(t *testing.T) {
+	c := scriptedConnWith(t, "scripted-tables-scan", &scriptedRows{
 		cols: []string{"name", "type"},
 		rows: [][]sqldriver.Value{{nil, "table"}}, // NULL name -> Scan fails
 	})
-	if _, err := c.Introspect(context.Background()); err == nil {
+	if _, err := c.Tables(context.Background(), "main"); err == nil {
 		t.Fatal("expected a scan error")
 	}
 }
 
-func TestIntrospectReportsARowsError(t *testing.T) {
-	c := scriptedConnWith(t, "scripted-introspect-err", &scriptedRows{
+func TestTablesReportsARowsError(t *testing.T) {
+	c := scriptedConnWith(t, "scripted-tables-err", &scriptedRows{
 		cols:     []string{"name", "type"},
 		rows:     [][]sqldriver.Value{{"users", "table"}},
 		errAfter: errors.New("simulated read failure"),
 	})
-	if _, err := c.Introspect(context.Background()); err == nil {
+	if _, err := c.Tables(context.Background(), "main"); err == nil {
 		t.Fatal("expected a rows error")
 	}
 }
