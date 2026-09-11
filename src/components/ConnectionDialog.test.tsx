@@ -155,6 +155,57 @@ it('returns focus to the element that opened the dialog after a successful save'
   await waitFor(() => expect(document.activeElement).toBe(opener));
 });
 
+// App.tsx keeps this component mounted for the life of the app and only
+// flips `open`, so every piece of state survives a close. Reopening therefore
+// used to show the last connection's name and file — and, worse, the previous
+// "Reachable" verdict, which is now asserting reachability about a file the
+// user is in the middle of replacing.
+it('resets the form and the stale test verdict when it is reopened', async () => {
+  testMock.mockResolvedValue({ ok: true });
+  saveMock.mockResolvedValue({
+    id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db', color: '#9e4436', read_only: true,
+  });
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  fireEvent.click(opener);
+  fill('local', '/tmp/a.db');
+  fireEvent.click(screen.getByRole('switch', { name: /production connection/i }));
+
+  await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
+  await screen.findByText(/reachable/i);
+
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+  fireEvent.click(opener);
+
+  expect((screen.getByLabelText(/name/i) as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText(/file/i) as HTMLInputElement).value).toBe('');
+  // The assertion that matters: a verdict about the previous file must not
+  // be standing over a blank form.
+  expect(screen.queryByText(/reachable/i)).toBeNull();
+  // Colour and the production flag come back to their defaults too, so the
+  // next connection does not inherit a red, read-only one.
+  expect(screen.getByRole('switch', { name: /production connection/i }).getAttribute('aria-checked')).toBe('false');
+  expect(screen.getByRole('button', { name: 'Colour #3d7d55' }).getAttribute('aria-pressed')).toBe('true');
+});
+
+it('clears a validation error when it is reopened', () => {
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  fireEvent.click(opener);
+  act(() => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+  expect(screen.getByRole('alert').textContent).toMatch(/name is required/i);
+
+  fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+  fireEvent.click(opener);
+
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByLabelText(/name/i).getAttribute('aria-invalid')).toBeNull();
+});
+
 it('reports a successful test inline', async () => {
   testMock.mockResolvedValue({ ok: true });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);

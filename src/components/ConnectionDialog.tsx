@@ -55,6 +55,19 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
 
   useEffect(() => {
     if (open) {
+      // App.tsx keeps this component mounted for the life of the app and
+      // only flips `open`, so nothing resets on its own: without this, the
+      // dialog reopens holding the last connection's name, file, colour and
+      // production flag — and its "Reachable" verdict, which would then be
+      // asserting reachability about a file the user is in the middle of
+      // replacing. A form that opens pre-filled with someone else's answers
+      // is a nuisance; one that opens with a stale verdict is misleading.
+      setName('');
+      setFile('');
+      setColor(DEFAULT_COLOR);
+      setProduction(false);
+      setTestStatus(null);
+      setFormError(null);
       // A type-only narrowing, not a runtime check: `document.activeElement`
       // is always at least `document.body` in a mounted document, and
       // nothing in this app ever focuses a non-HTML element, so there is no
