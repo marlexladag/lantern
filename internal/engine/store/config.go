@@ -303,9 +303,13 @@ func (s *Store) Delete(id string) error {
 		// nothing to restore — the secret staying absent is already
 		// correct, and guessing would mean filing an empty-string secret
 		// where none belongs.
-		// !priorKnown: couldn't prove what belonged there before Delete
-		// ran. Losing a secret is worse than leaving it deleted on a guess,
-		// so the keychain stays exactly as Delete left it.
+		// !priorKnown: snapshotSecret could not read what was there, so
+		// there is nothing to restore it from — priorSecret holds "", and
+		// filing that would replace an unrecoverable password with a wrong
+		// one rather than recover anything. This is not the same trade as
+		// Save's `default` branch above, which leaves a secret that still
+		// exists alone; here the secret is already gone, and no branch of
+		// this function can bring it back.
 		return err
 	}
 	return nil
