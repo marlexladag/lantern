@@ -1,8 +1,9 @@
-// @ts-expect-error type error without the @types/node package, which this
-// project deliberately does not carry — vite.config.ts imports node:process
-// the same way.
-import fs from 'node:fs';
 import { it, expect, vi, beforeEach } from 'vitest';
+// vitest.config.ts sets `css: true`, so this applies spec section 12's real
+// user-select policy to this document — the rule under test is a cascade
+// rule, not a value any component sets, so asserting it any other way would
+// be asserting against a copy of the stylesheet rather than the stylesheet.
+import '../styles/chrome.css';
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 
 // `asDbError` is a pure, dependency-free helper, so — like
@@ -333,60 +334,37 @@ it('discloses the driver text behind a collapsed Details control', async () => {
   expect(screen.getByText('disk I/O error (SQLITE_IOERR)')).toBeDefined();
 });
 
-/*
- * Loads the real user-select policy into this document.
- *
- * vitest runs with `css: false`, so a component's `import './X.css'` is
- * stubbed out here and even `?raw` on a stylesheet comes back empty — but
- * vitest.config.ts is outside this wave's remit, so the file is read from
- * disk and injected instead. The assertions below are then made against the
- * real rule text applied to the real DOM, rather than against a grep.
- */
-function applyChromePolicy(): () => void {
-  const style = document.createElement('style');
-  // Relative to the process's working directory, which npm sets to the
-  // package root for `npm run test`.
-  style.textContent = fs.readFileSync('src/styles/chrome.css', 'utf8');
-  document.head.appendChild(style);
-  return () => style.remove();
-}
-
 // Spec §12: UI chrome is not selectable text. Reported by the user after
 // watching a connection name highlight like a paragraph.
 it('makes a connection row unselectable while leaving error text selectable', async () => {
-  const removePolicy = applyChromePolicy();
-  try {
-    listMock.mockResolvedValue([conn]);
-    openMock.mockRejectedValue({
-      code: -32020,
-      message: 'boom',
-      data: {
-        kind: 'unknown',
-        message: 'the database reported an error',
-        native: 'disk I/O error (SQLITE_IOERR)',
-      },
-    });
+  listMock.mockResolvedValue([conn]);
+  openMock.mockRejectedValue({
+    code: -32020,
+    message: 'boom',
+    data: {
+      kind: 'unknown',
+      message: 'the database reported an error',
+      native: 'disk I/O error (SQLITE_IOERR)',
+    },
+  });
 
-    render(<Sidebar />);
-    await waitFor(() => expect(screen.getByText('local')).toBeDefined());
-    await act(async () => { screen.getByText('local').click(); });
-    await screen.findByText('the database reported an error');
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await screen.findByText('the database reported an error');
 
-    const row = screen.getByText('local').closest('.sidebar-row') as HTMLElement;
-    expect(getComputedStyle(row).userSelect).toBe('none');
+  const row = screen.getByText('local').closest('.sidebar-row') as HTMLElement;
+  expect(getComputedStyle(row).userSelect).toBe('none');
 
-    // The half a person copies into a search box or a bug report — the
-    // engine's message and the driver's own words behind the disclosure.
-    const message = document.querySelector('.error-text-message') as HTMLElement;
-    const native = document.querySelector('.error-text-native-body') as HTMLElement;
-    expect(getComputedStyle(message).userSelect).toBe('text');
-    expect(getComputedStyle(native).userSelect).toBe('text');
+  // The half a person copies into a search box or a bug report — the
+  // engine's message and the driver's own words behind the disclosure.
+  const message = document.querySelector('.error-text-message') as HTMLElement;
+  const native = document.querySelector('.error-text-native-body') as HTMLElement;
+  expect(getComputedStyle(message).userSelect).toBe('text');
+  expect(getComputedStyle(native).userSelect).toBe('text');
 
-    // The disclosure control itself is chrome, like the row.
-    expect(getComputedStyle(screen.getByText('Details')).userSelect).toBe('none');
-  } finally {
-    removePolicy();
-  }
+  // The disclosure control itself is chrome, like the row.
+  expect(getComputedStyle(screen.getByText('Details')).userSelect).toBe('none');
 });
 
 it('shows a lock glyph for a read-only connection', async () => {

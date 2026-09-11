@@ -3,6 +3,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'jsdom',
+    // Process real stylesheets instead of stubbing `import './X.css'` out.
+    // Spec section 12's user-select policy is a RULE, not a value a component
+    // sets, so the only honest way to test it is to let the real cascade run
+    // in the real DOM. Without this, that test has to read the stylesheet off
+    // disk itself with a cwd-relative path.
+    css: true,
     globals: true,
     include: ['src/**/*.test.{ts,tsx}'],
     coverage: {
