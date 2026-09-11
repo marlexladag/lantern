@@ -525,3 +525,219 @@ func TestReadOnlyConnectionStillAllowsReads(t *testing.T) {
 		t.Errorf("got %d rows, want 2", len(rows))
 	}
 }
+
+// -- ReadOnly (C-1): PRAGMA query_only is enforced against statements, and
+// -- `PRAGMA query_only=0` is itself a statement ---------------------------
+
+// openReadOnly opens path read-only and closes it when the test ends.
+func openReadOnly(t *testing.T, path string) driver.Conn {
+	t.Helper()
+	c, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path, ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// tableExists reopens path with a second, read-write connection and asks the
+// file itself. Asserting against the connection under test would prove only
+// that it declined to report the table; asserting against the file proves
+// the write never happened.
+func tableExists(t *testing.T, path, table string) bool {
+	t.Helper()
+	cat, err := open(t, path).Introspect(context.Background())
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	db, _ := cat.Database("main")
+	_, ok := db.Table(table)
+	return ok
+}
+
+// The verified repro, in its one-call form: `PRAGMA query_only=0` re-enables
+// writes on the connection, and SQLite executes both halves of the string.
+// Before the guard this returned a nil error and the table was really there
+// on reopening.
+func TestReadOnlyRefusesAPragmaAndAWriteSmuggledIntoOneCall(t *testing.T) {
+	path := fixture(t)
+	c := openReadOnly(t, path)
+
+	cur, err := c.Query(context.Background(), "PRAGMA query_only=0; CREATE TABLE defeated (id INTEGER)")
+	if err == nil {
+		cur.Close()
+		t.Fatal("a PRAGMA-plus-write smuggled into one call succeeded against a read-only connection")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindReadOnly {
+		t.Errorf("kind = %q, want %q", got.Kind, dberr.KindReadOnly)
+	}
+	if tableExists(t, path, "defeated") {
+		t.Error("the write went through: the table is in the file")
+	}
+}
+
+// The same repro in its two-call form. The first call must be refused; the
+// second is then refused by query_only itself, still set because the first
+// never ran. Both assertions matter: if the guard only caught the smuggled
+// form, this would pass the first call and clear query_only for the life of
+// that pooled connection.
+func TestReadOnlyRefusesClearingQueryOnlyInItsOwnCall(t *testing.T) {
+	path := fixture(t)
+	c := openReadOnly(t, path)
+
+	cur, err := c.Query(context.Background(), "PRAGMA query_only=0")
+	if err == nil {
+		cur.Close()
+		t.Fatal("PRAGMA query_only=0 succeeded against a read-only connection")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindReadOnly {
+		t.Errorf("kind = %q, want %q", got.Kind, dberr.KindReadOnly)
+	}
+
+	cur2, err := c.Query(context.Background(), "CREATE TABLE defeated (id INTEGER)")
+	if err == nil {
+		cur2.Close()
+		t.Fatal("CREATE TABLE succeeded after an attempt to clear query_only")
+	}
+	if tableExists(t, path, "defeated") {
+		t.Error("the write went through: the table is in the file")
+	}
+}
+
+// Each evasion the guard claims to handle, run as the attack rather than
+// argued. Case, whitespace, comments between tokens and the function-call
+// assignment form are all things a tokenizer-free check (a `strings.HasPrefix`
+// on the trimmed string, say) would let straight through.
+func TestReadOnlyRefusesEveryPragmaSpelling(t *testing.T) {
+	evasions := map[string]string{
+		"lower case":                    "pragma query_only=0",
+		"mixed case":                    "PrAgMa QuErY_oNlY = 0",
+		"leading whitespace":            "\n\t   PRAGMA query_only = 0",
+		"whitespace around the equals":  "PRAGMA   query_only   =   0",
+		"function-call assignment":      "PRAGMA query_only(0)",
+		"leading line comment":          "-- innocent\nPRAGMA query_only=0",
+		"leading block comment":         "/* innocent */PRAGMA query_only=0",
+		"comment between tokens":        "PRAGMA/* here */query_only/* and here */=0",
+		"line comment between tokens":   "PRAGMA --here\n query_only=0",
+		"smuggled behind a select":      "SELECT 1; PRAGMA query_only=0",
+		"smuggled behind a comment":     "SELECT 1 /* ; */; PRAGMA query_only=0",
+		"write after a bare select":     "SELECT 1; CREATE TABLE defeated (id INTEGER)",
+		"write behind a null statement": "SELECT 1;; CREATE TABLE defeated (id INTEGER)",
+	}
+
+	for name, stmt := range evasions {
+		t.Run(name, func(t *testing.T) {
+			path := fixture(t)
+			c := openReadOnly(t, path)
+
+			cur, err := c.Query(context.Background(), stmt)
+			if err == nil {
+				cur.Close()
+				t.Fatalf("%q succeeded against a read-only connection", stmt)
+			}
+			if got := dberr.From(err); got.Kind != dberr.KindReadOnly {
+				t.Errorf("kind = %q, want %q", got.Kind, dberr.KindReadOnly)
+			}
+
+			// The evasion is only interesting if it left the connection
+			// still refusing writes afterwards.
+			cur2, err := c.Query(context.Background(), "CREATE TABLE defeated (id INTEGER)")
+			if err == nil {
+				cur2.Close()
+				t.Fatal("the connection accepted a write after the refusal")
+			}
+			if tableExists(t, path, "defeated") {
+				t.Error("the write went through: the table is in the file")
+			}
+		})
+	}
+}
+
+// A guard that breaks reading would be a worse regression than the hole it
+// closes, so every shape of ordinary read that the tokenizer could plausibly
+// misread as a second statement is exercised here.
+func TestReadOnlyStillAllowsOrdinaryReads(t *testing.T) {
+	reads := map[string]string{
+		"plain select":                   "SELECT id FROM users",
+		"trailing semicolon":             "SELECT id FROM users;",
+		"trailing semicolon and space":   "SELECT id FROM users;   \n",
+		"trailing comment":               "SELECT id FROM users; -- done",
+		"trailing block comment":         "SELECT id FROM users; /* done */",
+		"semicolon inside a literal":     "SELECT id FROM users WHERE email <> ';'",
+		"semicolon inside an identifier": `SELECT "id" FROM users WHERE email <> ''';'''`,
+		"leading comment":                "/* the usual */ SELECT id FROM users",
+		"pragma-shaped column name":      `SELECT id AS "pragma" FROM users`,
+	}
+
+	for name, stmt := range reads {
+		t.Run(name, func(t *testing.T) {
+			c := openReadOnly(t, fixture(t))
+			cur, err := c.Query(context.Background(), stmt)
+			if err != nil {
+				t.Fatalf("%q was refused on a read-only connection: %v", stmt, err)
+			}
+			defer cur.Close()
+			rows, err := cur.Next(context.Background(), 10)
+			if err != nil {
+				t.Fatalf("next: %v", err)
+			}
+			if len(rows) != 2 {
+				t.Errorf("got %d rows, want 2", len(rows))
+			}
+		})
+	}
+}
+
+// The guard is keyed to the flag, not to the driver: a read-write connection
+// keeps running the statements a read-only one refuses. Without this, the
+// cheapest way to pass every test above would be to refuse them everywhere.
+func TestReadWriteConnectionKeepsRunningPragmasAndMultipleStatements(t *testing.T) {
+	path := fixture(t)
+	c := open(t, path)
+
+	cur, err := c.Query(context.Background(), "PRAGMA query_only")
+	if err != nil {
+		t.Fatalf("PRAGMA on a read-write connection: %v", err)
+	}
+	cur.Close()
+
+	cur2, err := c.Query(context.Background(), "SELECT 1; CREATE TABLE allowed (id INTEGER)")
+	if err != nil {
+		t.Fatalf("multi-statement on a read-write connection: %v", err)
+	}
+	cur2.Close()
+	if !tableExists(t, path, "allowed") {
+		t.Error("the read-write multi-statement write did not take effect")
+	}
+}
+
+// SQLite's table-valued pragma form is left alone by the guard — it is a
+// SELECT, and this proves it is not a way around query_only either. SQLite
+// documents these functions as reading built-in pragmas that have no side
+// effects; this asserts that documented property rather than trusting it,
+// because if it ever stopped holding, the guard above would not be looking.
+func TestReadOnlyIsNotDefeatedByTheTableValuedPragmaForm(t *testing.T) {
+	path := fixture(t)
+	c := openReadOnly(t, path)
+
+	// The setting form is not even accepted as a function argument.
+	if cur, err := c.Query(context.Background(), "SELECT * FROM pragma_query_only(0)"); err == nil {
+		cur.Close()
+		t.Error("pragma_query_only(0) was accepted as a table-valued function")
+	}
+	// The reading form is, and must leave the connection read-only.
+	cur, err := c.Query(context.Background(), "SELECT * FROM pragma_query_only")
+	if err != nil {
+		t.Fatalf("reading pragma_query_only: %v", err)
+	}
+	cur.Close()
+
+	cur2, err := c.Query(context.Background(), "CREATE TABLE defeated (id INTEGER)")
+	if err == nil {
+		cur2.Close()
+		t.Fatal("CREATE TABLE succeeded after the table-valued pragma form")
+	}
+	if tableExists(t, path, "defeated") {
+		t.Error("the write went through: the table is in the file")
+	}
+}

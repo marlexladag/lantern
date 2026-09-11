@@ -78,7 +78,7 @@ func (drv) Open(ctx context.Context, cfg driver.ConnConfig) (driver.Conn, error)
 		_ = db.Close()
 		return nil, classify(err, "")
 	}
-	return &conn{db: db}, nil
+	return &conn{db: db, readOnly: cfg.ReadOnly}, nil
 }
 
 // dsn builds the DSN modernc.org/sqlite actually understands for cfg.
@@ -125,7 +125,16 @@ func dsn(cfg driver.ConnConfig) string {
 	return cfg.File + "?" + q.Encode()
 }
 
-type conn struct{ db *sql.DB }
+type conn struct {
+	db *sql.DB
+	// readOnly mirrors ConnConfig.ReadOnly so Query can refuse the
+	// statements that would clear the query_only pragma dsn set. Keeping the
+	// flag here rather than re-reading `PRAGMA query_only` per call is
+	// deliberate: the value on the connection is exactly what an attacker
+	// would be trying to change, so trusting it would be trusting the thing
+	// under attack. See guardReadOnly.
+	readOnly bool
+}
 
 func (c *conn) Ping(ctx context.Context) error {
 	if err := c.db.PingContext(ctx); err != nil {
@@ -223,6 +232,14 @@ func (c *conn) Columns(ctx context.Context, database, table string) ([]schema.Co
 }
 
 func (c *conn) Query(ctx context.Context, stmt string, args ...any) (driver.Cursor, error) {
+	// The one place caller-supplied SQL enters this driver, and therefore
+	// the only chokepoint where a read-only connection can refuse what
+	// PRAGMA query_only cannot refuse for itself.
+	if c.readOnly {
+		if err := guardReadOnly(stmt); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := c.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, classify(err, stmt)

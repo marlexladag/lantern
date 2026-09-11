@@ -201,6 +201,24 @@ query_only`, which SQLite checks inside its own opcode dispatch. (Note for
 implementers: modernc.org/sqlite hardcodes `SQLITE_OPEN_READWRITE` at every
 open and silently ignores `mode=ro` in the DSN — its own test suite says so.)
 
+What `ReadOnly` is, precisely: a guard against an accidental write. The
+realistic failure it exists for is a user running an `UPDATE` or a `DELETE`
+against a connection they marked production. It is **not** a security
+boundary against someone who can author arbitrary SQL, and nothing in the UI
+may describe it as one. `PRAGMA query_only` is enforced against statements,
+and `PRAGMA query_only=0` is a statement — so a connection that will run
+arbitrary SQL can be told to stop being read-only, in the same call as the
+write it is clearing the way for. The SQLite driver therefore refuses, at its
+`Conn.Query` chokepoint on a read-only connection, every `PRAGMA` and any
+input carrying more than one statement. That is a tokenizer-level guard, and
+a tokenizer-level guard is only ever as good as the evasions its author
+thought of. The complete mechanism would be an authorizer callback
+(`sqlite3_set_authorizer`), which decides per operation inside SQLite rather
+than per statement outside it; modernc.org/sqlite exports none — the symbol
+is compiled into the vendored amalgamation, but the raw connection handle it
+needs is never exposed. A driver that does offer an authorizer should enforce
+`ReadOnly` with it and delete its tokenizer.
+
 A write refused by a read-only connection reports `KindReadOnly`, never
 `KindConstraint`. They demand opposite things of the user — fix the row versus
 reconnect read-write — and the UI cannot offer either if they share a Kind.
