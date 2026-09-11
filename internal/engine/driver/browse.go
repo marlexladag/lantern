@@ -42,6 +42,14 @@ type BrowseRequest struct {
 	// After is the previous page's Keyset, echoed back untouched. Nil for the
 	// first page.
 	After []Value `json:"after,omitempty"`
+	// SortToken is the previous page's BrowsePage.SortToken, echoed back
+	// untouched alongside After. It names — opaquely, to the caller — the
+	// sort that produced After, so a driver that supports it can tell a
+	// legitimate continuation apart from a cursor replayed under a sort that
+	// has since changed. A request that carries After with no SortToken, or
+	// a SortToken a driver does not check, is not an error: verification is
+	// an added safety a driver may offer, not a new required pairing.
+	SortToken string `json:"sort_token,omitempty"`
 	// Offset is used only when the driver told the caller it could not
 	// paginate by key.
 	Offset int `json:"offset,omitempty"`
@@ -71,6 +79,14 @@ type BrowsePage struct {
 	// understanding it. Absent when the driver paginated by offset, or when
 	// the result is exhausted.
 	Keyset []Value `json:"keyset,omitempty"`
+	// SortToken is issued alongside Keyset and names — again opaquely, the
+	// caller never decodes it — the sort that produced it. Echo it back as
+	// BrowseRequest.SortToken the next time this page's Keyset is sent as
+	// After; a driver that can verify it will then refuse a cursor replayed
+	// under a different sort instead of silently paging from a boundary that
+	// sort never produced. Absent exactly when Keyset is: there is nothing
+	// to name the sort of when there is no cursor to replay.
+	SortToken string `json:"sort_token,omitempty"`
 	// Exhausted is true when fewer rows than Limit came back, so the caller
 	// can stop asking.
 	Exhausted bool `json:"exhausted"`
