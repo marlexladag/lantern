@@ -40,10 +40,16 @@ const closeMock = vi.mocked(closeSession);
 // no `tables` key, because the engine no longer reads one on connect. A
 // fixture that still carried tables would be testing a wire shape the engine
 // cannot produce.
+//
+// `multiple_databases: true` because this is the fixture for every test that
+// wants a database ROW on screen, and that row only exists for a driver with
+// more than one database to choose between. The single-database shape — the
+// one SQLite actually ships — has its own fixtures at the bottom of this
+// file, and its own section of tests.
 const openResult = {
   session_id: 's1',
   catalog: { databases: [{ name: 'main' }] },
-  capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+  capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
 };
 
 const oneColumn = [
@@ -106,7 +112,7 @@ it('loads a table’s columns only when it is expanded', async () => {
   openMock.mockResolvedValue({
     session_id: 's1',
     catalog: { databases: [{ name: 'main', tables: [{ name: 'users', kind: 'table' }] }] },
-    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+    capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
   });
   columnsMock.mockResolvedValue([
     { name: 'id', data_type: 'INTEGER', nullable: false, primary_key: true, position: 0 },
@@ -811,7 +817,7 @@ it('renders a database tier and loads its tables on expand', async () => {
   openMock.mockResolvedValue({
     session_id: 's1',
     catalog: { databases: [{ name: 'main' }] },
-    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+    capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
   });
   tablesMock.mockResolvedValue([{ name: 'alpha', kind: 'table' }]);
 
@@ -834,7 +840,7 @@ it('survives a database whose tables arrive as null', async () => {
   openMock.mockResolvedValue({
     session_id: 's1',
     catalog: { databases: [{ name: 'main', tables: null as unknown as Table[] }] },
-    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+    capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
   });
   tablesMock.mockResolvedValue([]);
   render(<Sidebar />);
@@ -852,7 +858,7 @@ it('drops a tables response for a database the user has since collapsed', async 
   openMock.mockResolvedValue({
     session_id: 's1',
     catalog: { databases: [{ name: 'main' }] },
-    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+    capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
   });
   // Resolve only when the test says so, so the response lands AFTER the
   // collapse. A test that awaits the request before collapsing is testing the
@@ -1048,4 +1054,193 @@ it('drops a tables REJECTION for a database the user has since collapsed', async
 
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByText(/schema is locked/i)).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// The database tier is a capability, not a constant (Task 2b)
+//
+// `Capabilities.MultipleDatabases` is data on the wire, so both branches are
+// reachable from a fixture without a second driver existing. SQLite reports
+// false and has exactly one database; MySQL will report true and have many.
+// ---------------------------------------------------------------------------
+
+// The single-database shape. The database is deliberately NOT called `main`:
+// a fixture that used SQLite's own name could not tell "reads the catalog"
+// apart from "hardcodes the name SQLite happens to use".
+const soleDatabase = {
+  session_id: 's1',
+  catalog: { databases: [{ name: 'shop' }] },
+  capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+};
+
+// A driver with more than one database to choose between.
+const twoDatabases = {
+  session_id: 's1',
+  catalog: { databases: [{ name: 'shop' }, { name: 'analytics' }] },
+  capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
+};
+
+const perDatabaseTables = async (_sessionId: string, database: string): Promise<Table[]> =>
+  database === 'shop' ? [{ name: 'orders', kind: 'table' }] : [{ name: 'events', kind: 'table' }];
+
+it('hangs the tables straight off the connection when the driver has one database', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(soleDatabase);
+  tablesMock.mockResolvedValue([{ name: 'orders', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+  // No database row at all: a node with no siblings is a tier the user has
+  // to open to get past, and it is the tables they came for.
+  expect(screen.queryByText('shop')).toBeNull();
+  expect(screen.getAllByRole('treeitem')).toHaveLength(2); // the connection and `orders`
+  // ...and the name still came off the catalog.
+  expect(tablesMock).toHaveBeenCalledWith('s1', 'shop');
+});
+
+it('collapses a single database’s tables with the connection and does not refetch on re-expand', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(soleDatabase);
+  tablesMock.mockResolvedValue([{ name: 'orders', kind: 'table' }]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+
+  await act(async () => { screen.getByText('local').click(); }); // collapse
+  expect(screen.queryByText('orders')).toBeNull();
+
+  await act(async () => { screen.getByText('local').click(); }); // re-expand
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(1);
+});
+
+// The connection row is this database's only disclosure control, so a
+// collapse and re-expand while the read is still in flight must not start a
+// second one — and the first one's answer must still arrive.
+it('does not start a second read when a single-database connection is re-expanded mid-flight', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(soleDatabase);
+  let release!: (tables: Table[]) => void;
+  tablesMock.mockReturnValue(new Promise<Table[]>((resolve) => { release = resolve; }));
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+  await act(async () => { screen.getByText('local').click(); }); // collapse, mid-flight
+  await act(async () => { screen.getByText('local').click(); }); // re-expand, still mid-flight
+
+  await act(async () => { release([{ name: 'orders', kind: 'table' }]); });
+
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(1);
+});
+
+it('says No tables for a single database that holds nothing', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(soleDatabase);
+  tablesMock.mockResolvedValue([]);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText(/no tables/i)).toBeDefined());
+});
+
+// Spec §12 is keyboard-first, and the shallower tree is a different row list:
+// a shape that only collapses and expands by mouse is a regression.
+it('drives the single-database shape from the keyboard', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(soleDatabase);
+  tablesMock.mockResolvedValue([{ name: 'orders', kind: 'table' }]);
+  columnsMock.mockResolvedValue(oneColumn);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+
+  const tree = screen.getByRole('tree');
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the connection
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+
+  // One ArrowDown reaches the table, not a database row standing in the way.
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
+  expect(document.activeElement).toBe(screen.getByText('orders').closest('[role="treeitem"]'));
+
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+  await waitFor(() => expect(screen.getByText('id')).toBeDefined());
+  expect(onSelectTable).toHaveBeenCalledWith('s1', 'shop', 'orders');
+});
+
+it('says No databases when a single-database driver’s catalog arrives empty', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({
+    ...soleDatabase,
+    catalog: { databases: null as unknown as [] },
+  });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText(/no databases/i)).toBeDefined());
+  expect(tablesMock).not.toHaveBeenCalled();
+});
+
+// Adversarial: TWO databases, expanded independently. A one-database fixture
+// cannot tell a per-database cache from a global one — both look identical
+// when there is only ever one list to hold.
+it('expands two databases independently and keeps their table lists apart', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(twoDatabases);
+  tablesMock.mockImplementation(perDatabaseTables);
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  // Both database rows, and nothing read yet.
+  await waitFor(() => expect(screen.getByText('shop')).toBeDefined());
+  expect(screen.getByText('analytics')).toBeDefined();
+  expect(tablesMock).not.toHaveBeenCalled();
+
+  await act(async () => { screen.getByText('shop').click(); });
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+  expect(screen.queryByText('events')).toBeNull(); // the other one is still shut
+
+  await act(async () => { screen.getByText('analytics').click(); });
+  await waitFor(() => expect(screen.getByText('events')).toBeDefined());
+  expect(screen.getByText('orders')).toBeDefined(); // and the first stayed open
+
+  expect(tablesMock).toHaveBeenNthCalledWith(1, 's1', 'shop');
+  expect(tablesMock).toHaveBeenNthCalledWith(2, 's1', 'analytics');
+
+  // Per-database, not shared: re-expanding `shop` shows ITS tables again
+  // from cache. A single shared entry would hand it `events` — or refetch.
+  await act(async () => { screen.getByText('shop').click(); }); // collapse
+  expect(screen.queryByText('orders')).toBeNull();
+  expect(screen.getByText('events')).toBeDefined();
+  await act(async () => { screen.getByText('shop').click(); }); // re-expand
+  await waitFor(() => expect(screen.getByText('orders')).toBeDefined());
+  expect(tablesMock).toHaveBeenCalledTimes(2);
+});
+
+// Adversarial: a multiple-database driver that reports none at all. An empty
+// panel under an expanded connection is indistinguishable from a failure.
+it('renders an empty state when a multiple-database driver reports no databases', async () => {
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue({ ...twoDatabases, catalog: { databases: [] } });
+
+  render(<Sidebar />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await act(async () => { screen.getByText('local').click(); });
+
+  await waitFor(() => expect(screen.getByText(/no databases/i)).toBeDefined());
+  expect(screen.getByText('local')).toBeDefined(); // still a live sidebar
+  expect(tablesMock).not.toHaveBeenCalled();
 });

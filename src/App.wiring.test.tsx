@@ -91,7 +91,13 @@ const conn = {
 };
 
 // session.open carries the DATABASE list alone; the tables arrive from
-// session.tables when `main` is expanded (spec §5's two tiers).
+// session.tables when the connection is expanded (spec §5's two tiers).
+//
+// This is SQLite's real wire shape, capability included: one database, and
+// `multiple_databases: false` saying so. That is deliberate here — this file
+// is the "does the app work" suite, so it walks the tree the app actually
+// ships today. The two-tier shape a multiple-database driver gets is
+// exercised in Sidebar.test.tsx, where the tier itself is the subject.
 const catalog = {
   session_id: 's1',
   catalog: { databases: [{ name: 'main' }] },
@@ -157,14 +163,16 @@ afterEach(() => {
 });
 
 /**
- * Renders the app and walks both lazy tiers — the connection, then the `main`
- * database — leaving both tables visible.
+ * Renders the app and expands the connection, leaving both tables visible.
+ *
+ * One click, not two: SQLite reports `multiple_databases: false`, so there is
+ * no database row between the connection and its tables — expanding the
+ * connection is what reads them.
  */
 async function openConnection() {
   const view = render(<App />);
   await waitFor(() => expect(screen.getByText('local')).toBeDefined());
   await act(async () => { screen.getByText('local').click(); });
-  await act(async () => { (await screen.findByText('main')).click(); });
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   return view;
 }
@@ -199,9 +207,6 @@ it('shows a table’s rows when the table is chosen from the keyboard', async ()
 
   const tree = screen.getByRole('tree');
   await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the connection
-  await waitFor(() => expect(screen.getByText('main')).toBeDefined());
-  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
-  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the database
   await waitFor(() => expect(screen.getByText('users')).toBeDefined());
   act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
   await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); }); // the table

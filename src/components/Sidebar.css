@@ -1,4 +1,14 @@
+/*
+ * The tree's indentation ladder. Every indented line sets `--depth` to its
+ * tier (connection 0, then one step per tier below it) and reads its
+ * padding from these two, so the ladder is stated once instead of once per
+ * class. It has to be a value rather than a class per tier because the tiers
+ * are relative: a driver with a single database gets no database row, and
+ * everything below it moves up one step.
+ */
 .sidebar {
+  --indent-base: 10px;
+  --indent-step: 20px;
   flex: 0 0 var(--width-sidebar);
   width: var(--width-sidebar);
   border-right: var(--hairline) solid var(--color-line);
@@ -34,7 +44,8 @@
   align-items: center;
   gap: 7px;
   height: var(--row-sidebar);
-  padding: 0 10px;
+  padding-right: 10px;
+  padding-left: calc(var(--indent-base) + var(--depth, 0) * var(--indent-step));
   color: var(--color-text);
   font-size: var(--text-body);
   cursor: pointer;
@@ -51,18 +62,11 @@
 }
 
 /*
- * Three tiers, one step each: connection (10px, the base rule above),
- * database, table — then columns at 70px below. Introspection is lazy in
- * exactly these tiers (spec section 5), so the indentation is the tier
- * structure made visible rather than decoration.
+ * The database row alone is weighted: it names a container, not a thing you
+ * can look at. Its indentation comes from `--depth` like everything else.
  */
 .sidebar-row.is-db {
-  padding-left: 30px;
   font-weight: 500;
-}
-
-.sidebar-row.is-table {
-  padding-left: 50px;
 }
 
 .sidebar-dot {
@@ -111,23 +115,15 @@
 
 /*
  * Status and error lines sit under the row they belong to, so they indent
- * with it: the base rule is the connection tier ("Opening…"), `.at-db` the
- * database tier ("Loading tables…", "No tables") and `.at-table` the table
- * tier ("Loading columns…"). A line that failed to indent would read as
- * belonging to whichever row it happened to sit beneath.
+ * one tier deeper than it: "Opening…" under a connection, "Loading tables…"
+ * and "No tables" under a database, "Loading columns…" under a table. A line
+ * that failed to indent would read as belonging to whichever row it happened
+ * to sit beneath.
  */
 .sidebar-status {
   font-size: var(--text-label);
   color: var(--color-dim);
-  padding-left: 30px;
-}
-
-.sidebar-status.at-db {
-  padding-left: 50px;
-}
-
-.sidebar-status.at-table {
-  padding-left: 70px;
+  padding-left: calc(var(--indent-base) + var(--depth, 0) * var(--indent-step));
 }
 
 /*
@@ -141,17 +137,10 @@
 .sidebar-error {
   font-size: var(--text-label);
   color: var(--color-warn);
-  padding: 2px 10px 6px 30px;
+  padding: 2px 10px 6px;
+  padding-left: calc(var(--indent-base) + var(--depth, 0) * var(--indent-step));
   white-space: normal;
   word-break: break-word;
-}
-
-.sidebar-error.at-db {
-  padding-left: 50px;
-}
-
-.sidebar-error.at-table {
-  padding-left: 70px;
 }
 
 .sidebar-column {
@@ -159,7 +148,8 @@
   align-items: center;
   gap: 6px;
   height: var(--row-sidebar);
-  padding: 0 10px 0 70px;
+  padding-right: 10px;
+  padding-left: calc(var(--indent-base) + var(--depth, 0) * var(--indent-step));
   font-size: var(--text-body);
   color: var(--color-text);
 }

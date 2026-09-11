@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from 'react';
 import {
   closeSession,
   listConnections,
@@ -34,7 +42,26 @@ type SessionState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'error'; error: ErrorDescription }
-  | { status: 'open'; sessionId: string; catalog: Catalog; expanded: boolean };
+  | {
+      status: 'open';
+      sessionId: string;
+      catalog: Catalog;
+      /**
+       * `Capabilities.MultipleDatabases`, straight off session.open.
+       *
+       * It decides the SHAPE of the tree below this connection, not merely
+       * what to grey out: a driver with one database (SQLite always, and it
+       * is always called `main`) gets its tables hung directly off the
+       * connection, because a node with no siblings is a tier the user has
+       * to open to get past. A driver with several gets the database row,
+       * which is the only thing that can tell three identically-named
+       * `users` tables apart.
+       */
+      multipleDatabases: boolean;
+      expanded: boolean;
+    };
+
+type OpenSession = Extract<SessionState, { status: 'open' }>;
 
 interface DatabaseUiState {
   expanded: boolean;
@@ -59,6 +86,12 @@ interface TableUiState {
  * the old one's table and column lists and never refetch. The session id is
  * also what every RPC these caches feed is addressed to, so keying by it is
  * keying by the thing the data actually came from.
+ *
+ * Known and left alone: entries for a session that has since closed are
+ * never evicted, so they live as long as the sidebar does. One small entry
+ * per reopened connection, bounded by how many times a person reopens one in
+ * a single run — but whoever gives this structure a reason to grow (a
+ * refresh-schema affordance, a reconnect) should give it an eviction too.
  */
 function databaseKey(sessionId: string, databaseName: string) {
   return `${sessionId}\x00${databaseName}`;
@@ -83,6 +116,19 @@ function tableKey(sessionId: string, databaseName: string, tableName: string) {
  */
 function asTables(tables: Table[]): Table[] {
   return tables ?? [];
+}
+
+/**
+ * How far in a line sits, as a tier index rather than a length.
+ *
+ * The ladder itself — where tier 0 starts and how wide a step is — lives in
+ * Sidebar.css, which is where lengths belong. What the component knows is
+ * that the tiers are relative: a table's tables-tier depends on whether its
+ * database got a row of its own, so an element cannot carry a fixed class
+ * per tier without carrying two of them.
+ */
+function indent(depth: number): CSSProperties {
+  return { '--depth': depth } as CSSProperties;
 }
 
 type Row =
@@ -237,12 +283,18 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
       // writes a nil slice as `null`. See asTables above for the full story.
       for (const database of session.catalog.databases ?? []) {
         const dbKey = databaseKey(session.sessionId, database.name);
-        out.push({
-          kind: 'database',
-          id: dbKey,
-          sessionId: session.sessionId,
-          databaseName: database.name,
-        });
+        // The database row exists only where there is a choice to make. This
+        // list is what the keyboard walks, so it has to agree with the
+        // render below exactly — a row here that nothing draws would be a
+        // tabIndex owner with no element to focus.
+        if (session.multipleDatabases) {
+          out.push({
+            kind: 'database',
+            id: dbKey,
+            sessionId: session.sessionId,
+            databaseName: database.name,
+          });
+        }
         const dbUi = databases[dbKey];
         if (!dbUi?.expanded) continue;
         for (const table of dbUi.tables ?? []) {
@@ -275,28 +327,47 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
     // focus from wherever the user actually is.
   }, [rows, activeRowId]);
 
+  /**
+   * For a driver with a single database, the connection row IS that
+   * database's disclosure control — there is no database row to click — so
+   * expanding the connection is what reads its tables. The name comes off
+   * the catalog rather than being assumed to be `main`: that is SQLite's
+   * detail, not the UI's.
+   *
+   * Only ever called for an expand. Collapsing deliberately does not retire
+   * an in-flight read, unlike the database row's own collapse: there, an
+   * answer landing on a node the user closed would re-open it, whereas here
+   * the connection's collapse already hides everything and a late answer
+   * just fills the cache the next expand will use.
+   */
+  function revealFlattenedTables(session: OpenSession) {
+    if (session.multipleDatabases) return;
+    for (const database of session.catalog.databases ?? []) {
+      setDatabaseExpanded(session.sessionId, database.name, true);
+    }
+  }
+
   function toggleConnection(connection: Connection) {
     const existing = sessions[connection.id];
     if (existing?.status === 'open') {
-      setSessions((prev) => ({
-        ...prev,
-        [connection.id]: { ...existing, expanded: !existing.expanded },
-      }));
+      const expanded = !existing.expanded;
+      setSessions((prev) => ({ ...prev, [connection.id]: { ...existing, expanded } }));
+      if (expanded) revealFlattenedTables(existing);
       return;
     }
     if (existing?.status === 'loading') return;
     setSessions((prev) => ({ ...prev, [connection.id]: { status: 'loading' } }));
     openSession(connection.id)
       .then((result) => {
-        setSessions((prev) => ({
-          ...prev,
-          [connection.id]: {
-            status: 'open',
-            sessionId: result.session_id,
-            catalog: result.catalog,
-            expanded: true,
-          },
-        }));
+        const session: OpenSession = {
+          status: 'open',
+          sessionId: result.session_id,
+          catalog: result.catalog,
+          multipleDatabases: result.capabilities.multiple_databases,
+          expanded: true,
+        };
+        setSessions((prev) => ({ ...prev, [connection.id]: session }));
+        revealFlattenedTables(session);
       })
       .catch((err) => {
         const described = describeError(err);
@@ -312,17 +383,22 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
   }
 
   /**
-   * Expand or collapse one database, reading its table list the first time.
+   * Show or hide one database's tables, reading them the first time.
+   *
+   * Takes the state it must end in rather than toggling, because the two
+   * callers know different things: the database row toggles, while a
+   * connection expanding in the single-database shape only ever means
+   * "show", and must stay idempotent — it fires on every expand.
    *
    * Collapsing while a read is in flight retires that read rather than
    * ignoring the click: a request nobody can still want is a request whose
    * answer must not land, and leaving it live is how a node the user closed
    * springs back open a second later.
    */
-  function activateDatabase(sessionId: string, databaseName: string) {
+  function setDatabaseExpanded(sessionId: string, databaseName: string, expanded: boolean) {
     const key = databaseKey(sessionId, databaseName);
     const existing = databases[key];
-    if (existing?.expanded) {
+    if (!expanded) {
       nextGeneration(key);
       setDatabases((prev) => ({
         ...prev,
@@ -330,6 +406,12 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
       }));
       return;
     }
+    // A read is already running and will land expanded. Reachable from the
+    // single-database shape alone: collapsing the connection leaves the read
+    // alive, so a quick collapse-and-re-expand arrives here mid-flight, and
+    // without this it would retire a perfectly good request to start an
+    // identical one.
+    if (existing?.loading) return;
     // Already read: flip visibility only, never refetch. An empty database
     // is `[]`, which is still "read" — the reason this tests the property
     // rather than the length.
@@ -359,6 +441,11 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
           [key]: { expanded: true, loading: false, error: described },
         }));
       });
+  }
+
+  function activateDatabase(sessionId: string, databaseName: string) {
+    const key = databaseKey(sessionId, databaseName);
+    setDatabaseExpanded(sessionId, databaseName, !databases[key]?.expanded);
   }
 
   // Takes `sessionId` from the caller rather than looking it up, because
@@ -438,6 +525,94 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
     if (el) rowRefs.current.set(id, el);
     else rowRefs.current.delete(id);
   }
+  /**
+   * The tables and error lines that hang off ONE database.
+   *
+   * `depth` is the tier those tables sit at, and it differs between the two
+   * shapes by exactly one step — the database row is drawn in one and absent
+   * in the other. Passing it in is what lets this be a single renderer
+   * instead of two that have to be kept in step.
+   */
+  function renderDatabaseBody(sessionId: string, databaseName: string, depth: number) {
+    const dbUi = databases[databaseKey(sessionId, databaseName)];
+    return (
+      <>
+        {dbUi?.loading && (
+          <div className="sidebar-status" style={indent(depth)}>
+            Loading tables…
+          </div>
+        )}
+        {dbUi?.error && (
+          <div role="alert" className="sidebar-error" style={indent(depth)}>
+            <ErrorText description={dbUi.error} />
+          </div>
+        )}
+        {dbUi?.expanded &&
+          dbUi.tables &&
+          // A database that has been read and holds nothing says so. A
+          // database that draws blank is indistinguishable from one that
+          // failed to load.
+          (dbUi.tables.length === 0 ? (
+            <div className="sidebar-status" style={indent(depth)}>
+              No tables
+            </div>
+          ) : (
+            dbUi.tables.map((table) => {
+              const rowId = tableKey(sessionId, databaseName, table.name);
+              const ui = tables[rowId];
+              const isSelected =
+                selectedTable?.sessionId === sessionId &&
+                selectedTable.database === databaseName &&
+                selectedTable.table === table.name;
+              return (
+                <div key={rowId}>
+                  <div
+                    role="treeitem"
+                    aria-expanded={ui?.expanded ?? false}
+                    // Only table rows carry this: a connection or database
+                    // row is not something the main pane can show, so
+                    // claiming it is unselected would be a state it does not
+                    // have.
+                    aria-selected={isSelected}
+                    tabIndex={activeRowId === rowId ? 0 : -1}
+                    ref={(el) => setRowRef(rowId, el)}
+                    className={`sidebar-row${isSelected ? ' is-selected' : ''}`}
+                    style={indent(depth)}
+                    onClick={() => {
+                      setActiveRowId(rowId);
+                      activateTable(sessionId, databaseName, table);
+                    }}
+                  >
+                    <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>
+                      &#9656;
+                    </span>
+                    <span>{table.name}</span>
+                  </div>
+                  {ui?.loading && (
+                    <div className="sidebar-status" style={indent(depth + 1)}>
+                      Loading columns…
+                    </div>
+                  )}
+                  {ui?.error && (
+                    <div role="alert" className="sidebar-error" style={indent(depth + 1)}>
+                      <ErrorText description={ui.error} />
+                    </div>
+                  )}
+                  {ui?.expanded &&
+                    ui.columns?.map((column) => (
+                      <div key={column.name} className="sidebar-column" style={indent(depth + 1)}>
+                        <span className="sidebar-column-name">{column.name}</span>
+                        {column.primary_key && <span className="sidebar-pk">PK</span>}
+                        <span className="sidebar-column-type">{column.data_type}</span>
+                      </div>
+                    ))}
+                </div>
+              );
+            })
+          ))}
+      </>
+    );
+  }
 
   if (!loaded) {
     return (
@@ -451,7 +626,7 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
     <div className="sidebar">
       <div className="sidebar-section">Connections</div>
       {listError && (
-        <div role="alert" className="sidebar-error">
+        <div role="alert" className="sidebar-error" style={indent(1)}>
           <ErrorText description={listError} />
         </div>
       )}
@@ -477,6 +652,7 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
                   tabIndex={activeRowId === connection.id ? 0 : -1}
                   ref={(el) => setRowRef(connection.id, el)}
                   className="sidebar-row"
+                  style={indent(0)}
                   onClick={() => {
                     setActiveRowId(connection.id);
                     toggleConnection(connection);
@@ -493,9 +669,13 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
                     </span>
                   )}
                 </div>
-                {session?.status === 'loading' && <div className="sidebar-status">Opening…</div>}
+                {session?.status === 'loading' && (
+                  <div className="sidebar-status" style={indent(1)}>
+                    Opening…
+                  </div>
+                )}
                 {session?.status === 'error' && (
-                  <div role="alert" className="sidebar-error">
+                  <div role="alert" className="sidebar-error" style={indent(1)}>
                     <ErrorText description={session.error} />
                   </div>
                 )}
@@ -505,96 +685,45 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
                   // here is indistinguishable from a catalog that failed to
                   // load, which is the same defect in a different disguise.
                   (catalogDatabases.length === 0 ? (
-                    <div className="sidebar-status">No databases</div>
+                    <div className="sidebar-status" style={indent(1)}>
+                      No databases
+                    </div>
                   ) : (
                     catalogDatabases.map((database) => {
                       const dbKey = databaseKey(session.sessionId, database.name);
-                      const dbUi = databases[dbKey];
+                      // One database, and the driver says so: the tables take
+                      // the tier the database row would have occupied. See
+                      // SessionState.multipleDatabases for why this is a shape
+                      // decision rather than a cosmetic one.
+                      if (!session.multipleDatabases) {
+                        return (
+                          <Fragment key={dbKey}>
+                            {renderDatabaseBody(session.sessionId, database.name, 1)}
+                          </Fragment>
+                        );
+                      }
                       return (
                         <div key={dbKey}>
                           <div
                             role="treeitem"
-                            aria-expanded={dbUi?.expanded ?? false}
+                            aria-expanded={databases[dbKey]?.expanded ?? false}
                             tabIndex={activeRowId === dbKey ? 0 : -1}
                             ref={(el) => setRowRef(dbKey, el)}
                             className="sidebar-row is-db"
+                            style={indent(1)}
                             onClick={() => {
                               setActiveRowId(dbKey);
                               activateDatabase(session.sessionId, database.name);
                             }}
                           >
-                            <span className={`sidebar-caret${dbUi?.expanded ? ' is-open' : ''}`}>
+                            <span
+                              className={`sidebar-caret${databases[dbKey]?.expanded ? ' is-open' : ''}`}
+                            >
                               &#9656;
                             </span>
                             <span>{database.name}</span>
                           </div>
-                          {dbUi?.loading && (
-                            <div className="sidebar-status at-db">Loading tables…</div>
-                          )}
-                          {dbUi?.error && (
-                            <div role="alert" className="sidebar-error at-db">
-                              <ErrorText description={dbUi.error} />
-                            </div>
-                          )}
-                          {dbUi?.expanded &&
-                            dbUi.tables &&
-                            // A database that has been read and holds nothing
-                            // says so. A database that draws blank is
-                            // indistinguishable from one that failed to load.
-                            (dbUi.tables.length === 0 ? (
-                              <div className="sidebar-status at-db">No tables</div>
-                            ) : (
-                              dbUi.tables.map((table) => {
-                                const rowId = tableKey(session.sessionId, database.name, table.name);
-                                const ui = tables[rowId];
-                                const isSelected =
-                                  selectedTable?.sessionId === session.sessionId &&
-                                  selectedTable.database === database.name &&
-                                  selectedTable.table === table.name;
-                                return (
-                                  <div key={rowId}>
-                                    <div
-                                      role="treeitem"
-                                      aria-expanded={ui?.expanded ?? false}
-                                      // Only table rows carry this: a
-                                      // connection or database row is not
-                                      // something the main pane can show, so
-                                      // claiming it is unselected would be a
-                                      // state it does not have.
-                                      aria-selected={isSelected}
-                                      tabIndex={activeRowId === rowId ? 0 : -1}
-                                      ref={(el) => setRowRef(rowId, el)}
-                                      className={`sidebar-row is-table${isSelected ? ' is-selected' : ''}`}
-                                      onClick={() => {
-                                        setActiveRowId(rowId);
-                                        activateTable(session.sessionId, database.name, table);
-                                      }}
-                                    >
-                                      <span className={`sidebar-caret${ui?.expanded ? ' is-open' : ''}`}>
-                                        &#9656;
-                                      </span>
-                                      <span>{table.name}</span>
-                                    </div>
-                                    {ui?.loading && (
-                                      <div className="sidebar-status at-table">Loading columns…</div>
-                                    )}
-                                    {ui?.error && (
-                                      <div role="alert" className="sidebar-error at-table">
-                                        <ErrorText description={ui.error} />
-                                      </div>
-                                    )}
-                                    {ui?.expanded &&
-                                      ui.columns?.map((column) => (
-                                        <div key={column.name} className="sidebar-column">
-                                          <span className="sidebar-column-name">{column.name}</span>
-                                          {column.primary_key && <span className="sidebar-pk">PK</span>}
-                                          <span className="sidebar-column-type">{column.data_type}</span>
-                                        </div>
-                                      ))}
-                                  </div>
-                                );
-                              })
-                            ))}
+                          {renderDatabaseBody(session.sessionId, database.name, 2)}
                         </div>
                       );
                     })
