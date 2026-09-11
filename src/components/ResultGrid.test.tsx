@@ -80,7 +80,7 @@ vi.mock('../lib/browse', async () => {
 });
 
 import { browsePage, type BrowsePage, type ColumnMeta, type Value, type ValueKind } from '../lib/browse';
-import { ResultGrid, BROWSE_PAGE_SIZE } from './ResultGrid';
+import { ResultGrid, BROWSE_PAGE_SIZE, MAX_BUFFERED_PAGES } from './ResultGrid';
 
 const browsePageMock = vi.mocked(browsePage);
 
@@ -747,4 +747,101 @@ it('ignores a rejection that arrives for the table the user has already left', a
 
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.getByTestId('cell-0-0').textContent).toBe('A-1');
+});
+
+// -- fix wave D-5: the buffer is capped (spec section 7.3) ---------------
+
+/**
+ * A full page whose ids continue from `start`, so every row stays
+ * identifiable across pages and an evicted window can be told from a
+ * re-fetched one.
+ */
+function fullPageFrom(start: number): BrowsePage {
+  return makePage({
+    rows: Array.from({ length: BROWSE_PAGE_SIZE }, (_, i) => [v('int', String(start + i))]),
+    keyset: [v('int', String(start + BROWSE_PAGE_SIZE - 1))],
+    sort_token: 'tok-abc123',
+    exhausted: false,
+  });
+}
+
+/** Queues one more page than the cap can hold, newest last. */
+function queuePastTheCap() {
+  const pages = Array.from({ length: MAX_BUFFERED_PAGES + 1 }, (_, i) =>
+    fullPageFrom(i * BROWSE_PAGE_SIZE),
+  );
+  // The fallback answers the scroll-back re-fetch, which asks for window 0
+  // again; the queue answers the walk down.
+  browsePageMock.mockResolvedValue(pages[0]);
+  pages.forEach((page) => browsePageMock.mockResolvedValueOnce(page));
+  return pages;
+}
+
+/** Scrolls to the end of what is loaded, page by page, past the cap. */
+async function scrollPastTheCap() {
+  await settled();
+  for (let page = 1; page <= MAX_BUFFERED_PAGES; page++) {
+    await waitFor(() => expect(harness.props!.rows).toBe(page * BROWSE_PAGE_SIZE));
+    scrollTo(page * BROWSE_PAGE_SIZE - 10);
+  }
+  await waitFor(() => expect(harness.props!.rows).toBe((MAX_BUFFERED_PAGES + 1) * BROWSE_PAGE_SIZE));
+}
+
+/** How many rows the grid is actually holding, as opposed to counting. */
+function bufferedRows(): number {
+  let held = 0;
+  for (let row = 0; row < harness.props!.rows; row++) {
+    if (harness.props!.getCellContent([0, row]).kind !== 'loading') held += 1;
+  }
+  return held;
+}
+
+// Spec section 7.3: the buffer "evicts its oldest window ... rather than
+// growing memory without bound". Before this the grid appended every page
+// and never evicted, so a long scroll down a large table was a memory leak
+// the user reached by holding the scrollbar.
+it('stops buffering past the cap instead of growing without bound', async () => {
+  queuePastTheCap();
+
+  mount();
+  await scrollPastTheCap();
+
+  // It still KNOWS how many rows it has seen — the scrollbar must not jump
+  // backwards when a window is dropped.
+  expect(harness.props!.rows).toBe((MAX_BUFFERED_PAGES + 1) * BROWSE_PAGE_SIZE);
+  // But it holds no more than the cap.
+  expect(bufferedRows()).toBe(MAX_BUFFERED_PAGES * BROWSE_PAGE_SIZE);
+  // And the OLDEST window is the one that went, not the newest.
+  expect(harness.props!.getCellContent([0, 0]).kind).toBe('loading');
+  expect(harness.props!.getCellContent([0, MAX_BUFFERED_PAGES * BROWSE_PAGE_SIZE]).data).toBe(
+    String(MAX_BUFFERED_PAGES * BROWSE_PAGE_SIZE),
+  );
+});
+
+// Evicting rows the user can scroll back to needs an answer, and blank rows
+// are not it. The cursor that opened each window is kept — a few values and
+// a token, not a page of rows — so scrolling back re-fetches exactly that
+// window, which is what the spec's windowing implies.
+it('re-fetches an evicted window when the viewport scrolls back into it', async () => {
+  queuePastTheCap();
+
+  mount();
+  await scrollPastTheCap();
+  expect(harness.props!.getCellContent([0, 0]).kind).toBe('loading');
+
+  const fetches = browsePageMock.mock.calls.length;
+  scrollTo(0);
+
+  await waitFor(() => expect(browsePageMock).toHaveBeenCalledTimes(fetches + 1));
+  // Window 0 starts at the top, so it is continued from no cursor at all.
+  expect(browsePageMock.mock.calls[fetches]).toEqual([
+    's1',
+    { database: 'main', table: 'users', limit: BROWSE_PAGE_SIZE },
+  ]);
+  await waitFor(() => expect(harness.props!.getCellContent([0, 0]).kind).not.toBe('loading'));
+  expect(harness.props!.getCellContent([0, 0]).data).toBe('0');
+  // Re-fetching an old window must not shrink the grid or un-know the rows
+  // past it: it is a re-read of something already counted.
+  expect(harness.props!.rows).toBe((MAX_BUFFERED_PAGES + 1) * BROWSE_PAGE_SIZE);
+  expect(bufferedRows()).toBe(MAX_BUFFERED_PAGES * BROWSE_PAGE_SIZE);
 });
