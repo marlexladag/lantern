@@ -10,6 +10,7 @@ import {
   type Table,
 } from '../lib/connections';
 import { describeError, type ErrorDescription } from '../lib/errors';
+import { ErrorText } from './ErrorText';
 import './Sidebar.css';
 
 /**
@@ -281,7 +282,7 @@ export function Sidebar() {
       <div className="sidebar-section">Connections</div>
       {listError && (
         <div role="alert" className="sidebar-error">
-          {listError.message}
+          <ErrorText description={listError} />
         </div>
       )}
       {connections.length === 0 ? (
@@ -323,7 +324,7 @@ export function Sidebar() {
                 {session?.status === 'loading' && <div className="sidebar-status">Opening…</div>}
                 {session?.status === 'error' && (
                   <div role="alert" className="sidebar-error">
-                    {session.error.message}
+                    <ErrorText description={session.error} />
                   </div>
                 )}
                 {isOpen &&
@@ -352,7 +353,7 @@ export function Sidebar() {
                           {ui?.loading && <div className="sidebar-status">Loading columns…</div>}
                           {ui?.error && (
                             <div role="alert" className="sidebar-error">
-                              {ui.error.message}
+                              <ErrorText description={ui.error} />
                             </div>
                           )}
                           {ui?.expanded &&

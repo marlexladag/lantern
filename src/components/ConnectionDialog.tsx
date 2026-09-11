@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { saveConnection, testConnection, type Connection, type NewConnection } from '../lib/connections';
 import { describeError, type ErrorDescription } from '../lib/errors';
+import { ErrorText } from './ErrorText';
 import './ConnectionDialog.css';
 
 export interface ConnectionDialogProps {
@@ -325,7 +326,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
 
           {formError && (
             <div role="alert" className="field-error">
-              {formError.message}
+              <ErrorText description={formError} />
             </div>
           )}
         </div>
@@ -343,7 +344,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
           {testStatus?.kind === 'error' && (
             <div className="test-result error">
               <span className="result-dot" />
-              {testStatus.error.message}
+              <ErrorText description={testStatus.error} />
             </div>
           )}
           <span className="spacer" />

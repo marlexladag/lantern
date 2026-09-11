@@ -1,0 +1,44 @@
+/*
+ * Every failure surface in the shell renders through this, so it carries no
+ * colour of its own: it inherits from whichever container holds it, which is
+ * what keeps the sidebar's retryable warn treatment and the dialog's
+ * validation treatment consistent with the rest of those panels.
+ */
+.error-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.error-text-message {
+  word-break: break-word;
+}
+
+.error-text-native {
+  font-size: var(--text-label);
+}
+
+/*
+ * The disclosure control is chrome — the text it reveals is not (see the
+ * user-select policy in styles/chrome.css).
+ */
+.error-text-native > summary {
+  cursor: pointer;
+  color: var(--color-dim);
+  list-style-position: outside;
+}
+
+/*
+ * Mono, because this is the driver's own wording: it carries identifiers,
+ * SQLite result codes and column names that are read character by character
+ * when someone is searching for them.
+ */
+.error-text-native-body {
+  display: block;
+  padding-top: 3px;
+  font-family: var(--font-mono);
+  color: var(--color-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

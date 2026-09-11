@@ -253,6 +253,27 @@ it('renders nothing for a canceled listConnections beyond the empty state', asyn
   expect(screen.queryByRole('alert')).toBeNull();
 });
 
+// The engine's `message` is engine-neutral and its `native` is the driver's
+// own text (spec §11). The sidebar must surface the second on demand, not
+// swallow it — nothing in src/ rendered `native` at all before this.
+it('discloses the driver text behind a collapsed Details control', async () => {
+  listMock.mockRejectedValue({
+    code: -32020,
+    message: 'boom',
+    data: {
+      kind: 'unknown',
+      message: 'the database reported an error',
+      native: 'disk I/O error (SQLITE_IOERR)',
+    },
+  });
+  render(<Sidebar />);
+
+  await screen.findByText('the database reported an error');
+  const details = document.querySelector('details') as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(screen.getByText('disk I/O error (SQLITE_IOERR)')).toBeDefined();
+});
+
 it('shows a lock glyph for a read-only connection', async () => {
   listMock.mockResolvedValue([{ ...conn, id: 'a2', name: 'prod', color: '#9e4436', read_only: true }]);
   render(<Sidebar />);

@@ -385,6 +385,28 @@ it('renders the no-IPC-bridge message from a save rather than [object Object]', 
   expect(screen.getByRole('alert').textContent).not.toContain('[object');
 });
 
+// Same disclosure as the sidebar's, at the dialog's own failure surface.
+it('discloses the driver text behind a collapsed Details control on a failed save', async () => {
+  saveMock.mockRejectedValue({
+    code: -32020,
+    message: 'boom',
+    data: {
+      kind: 'unknown',
+      message: 'the database reported an error',
+      native: 'attempt to write a readonly database',
+    },
+  });
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  fill('local', '/tmp/a.db');
+
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  await screen.findByText('the database reported an error');
+  const details = document.querySelector('details') as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(screen.getByText('attempt to write a readonly database')).toBeDefined();
+});
+
 it('disables Connect while a save is in flight and ignores a second click', async () => {
   let resolveSave: ((c: typeof stored) => void) | undefined;
   const stored = { id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db', color: '#3d7d55', read_only: false };
