@@ -170,6 +170,7 @@ func main() {
 	api.RegisterConnections(srv, st)
 	api.RegisterSession(srv, st, sess)
 	api.RegisterBrowse(srv, sess)
+	api.RegisterDrivers(srv)
 
 	// Readiness marker: written once signal handling is registered and the
 	// handler is bound, immediately before Serve starts reading. This is a
