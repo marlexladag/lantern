@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,21 @@ func TestSuiteFailsADriverThatViolatesEachInvariant(t *testing.T) {
 
 		{"Ping fails on an open connection", func(d *brokenDriver) { d.failPing = true }, "ping"},
 		{"Ping succeeds after Close", func(d *brokenDriver) { d.pingAfterClose = true }, "after close"},
+
+		{"the seeded table cannot be read back", func(d *brokenDriver) { d.failSelect = true }, "back with select"},
+		{"Cursor.Next signals exhaustion with io.EOF", func(d *brokenDriver) { d.cursorEOF = true }, "never io.eof"},
+		{"Cursor.Next fails once the result is exhausted", func(d *brokenDriver) { d.cursorFailsPastTheEnd = true }, "already-exhausted cursor reported"},
+		{"Cursor.Next returns more rows than it was asked for", func(d *brokenDriver) { d.cursorOverreads = true }, "n is a ceiling"},
+		{"Cursor.Next returns rows after exhaustion", func(d *brokenDriver) { d.cursorRowsPastTheEnd = true }, "already exhausted"},
+
+		{"RequiredFields names a field the working config supplies", func(d *brokenDriver) { d.requireAWorkingField = true }, "connects with"},
+		{"RequiredFields answers outside ConnConfig's vocabulary", func(d *brokenDriver) { d.requireAnUnknownField = true }, "lowercased name"},
+
+		{"a write is accepted on a read-only connection", func(d *brokenDriver) { d.acceptWritesWhenReadOnly = true }, "worse than no flag"},
+		{"a read-only write is refused to the caller and taken anyway", func(d *brokenDriver) { d.readOnlyRefusesButWrites = true }, "independent read-write"},
+		{"a read-only write is refused with the wrong kind", func(d *brokenDriver) { d.wrongKindReadOnly = true }, "read_only"},
+		{"a read-write connection cannot create the control table", func(d *brokenDriver) { d.failReadWriteProbe = true }, "over a read-write connection"},
+		{"a table that was just created is invisible to Columns", func(d *brokenDriver) { d.hideCreatedTables = true }, "proves nothing"},
 
 		{"Browse fails", func(d *brokenDriver) { d.failBrowse = true }, "browse"},
 		{"Browse returns a nil page and no error", func(d *brokenDriver) { d.nilPage = true }, "nil page"},
@@ -143,6 +159,21 @@ func TestSuiteStillCountsRowsForAnOffsetPagingDriver(t *testing.T) {
 	d.offsetPaging, d.skipRow = true, true
 	if fake := runSuite(d); !fake.failed {
 		t.Fatal("the suite passed an offset-paging driver that loses a row")
+	}
+}
+
+// Spec section 4 gives a driver with no engine-enforced read-only mechanism
+// exactly one permitted answer: fail Open. So a driver that refuses the flag
+// must reach the end of the suite rather than fail it — the refusal IS the
+// safety mechanism, and a suite that punished it would push the next driver
+// toward accepting a flag it cannot honour.
+func TestSuiteAcceptsADriverThatRefusesAReadOnlyConnection(t *testing.T) {
+	d := newBrokenDriver()
+	d.refuseReadOnlyOpen = true
+	fake := runSuite(d)
+	if fake.failed {
+		t.Fatalf("the suite failed a driver that refuses read-only at Open, which is what "+
+			"section 4 requires of a driver that cannot enforce it:\n%s", fake.text())
 	}
 }
 
@@ -298,6 +329,26 @@ type brokenDriver struct {
 	failPing       bool
 	pingAfterClose bool
 
+	failSelect            bool
+	cursorEOF             bool
+	cursorFailsPastTheEnd bool
+	cursorOverreads       bool
+	cursorRowsPastTheEnd  bool
+
+	requireAWorkingField  bool
+	requireAnUnknownField bool
+
+	// The read-only breaks. acceptWritesWhenReadOnly is a driver that takes
+	// the flag and ignores it; readOnlyRefusesButWrites is the subtler one
+	// this suite reads back over an independent connection to catch — the
+	// caller sees a refusal and the engine takes the write anyway.
+	refuseReadOnlyOpen       bool
+	acceptWritesWhenReadOnly bool
+	readOnlyRefusesButWrites bool
+	wrongKindReadOnly        bool
+	failReadWriteProbe       bool
+	hideCreatedTables        bool
+
 	noBrowser    bool
 	offsetPaging bool
 
@@ -325,9 +376,27 @@ type brokenDriver struct {
 	// stmts records every statement the suite issued, so a test can assert
 	// which DDL was used.
 	stmts []string
+	// created records the tables a CREATE TABLE actually LANDED for, on the
+	// driver rather than the connection, so a write taken through one
+	// connection is visible through another. Modelling where the write lands
+	// — not merely whether the caller was refused — is what lets the
+	// read-only checks be read back independently.
+	created map[string]bool
 }
 
-func newBrokenDriver() *brokenDriver { return &brokenDriver{} }
+func newBrokenDriver() *brokenDriver {
+	return &brokenDriver{created: map[string]bool{}}
+}
+
+// createdTable reports the table name a CREATE TABLE statement names.
+func createdTable(stmt string) (string, bool) {
+	rest, ok := strings.CutPrefix(stmt, "CREATE TABLE ")
+	if !ok {
+		return "", false
+	}
+	name, _, _ := strings.Cut(rest, " ")
+	return name, name != ""
+}
 
 func (d *brokenDriver) ID() string { return "broken" }
 
@@ -366,18 +435,35 @@ func (d *brokenDriver) fixtureDB() string {
 	return brokenDatabase
 }
 
-func (d *brokenDriver) RequiredFields(driver.ConnConfig) []string { return nil }
+func (d *brokenDriver) RequiredFields(cfg driver.ConnConfig) []string {
+	switch {
+	case d.requireAWorkingField:
+		// Named for every config, the one the suite connects with included.
+		return []string{"file"}
+	case d.requireAnUnknownField && cfg.Driver == "":
+		// Only for the empty config, so this break is about the VOCABULARY
+		// alone and does not also trip the over-reporting check above.
+		return []string{"SQLite file path"}
+	}
+	return nil
+}
 
 func (d *brokenDriver) open(TestingT) driver.ConnConfig {
 	return driver.ConnConfig{Driver: d.ID()}
 }
 
-func (d *brokenDriver) Open(context.Context, driver.ConnConfig) (driver.Conn, error) {
+func (d *brokenDriver) Open(_ context.Context, cfg driver.ConnConfig) (driver.Conn, error) {
 	d.opens++
 	if d.failOpen || (d.failSecondOpen && d.opens > 1) {
 		return nil, dberr.New(dberr.KindNetwork, "broken: refusing to open")
 	}
-	c := &brokenConn{d: d}
+	if cfg.ReadOnly && d.refuseReadOnlyOpen {
+		// The permitted answer for an engine with no enforcement mechanism:
+		// refuse the flag rather than accept it and allow writes.
+		return nil, dberr.New(dberr.KindUnsupported,
+			"broken: this engine cannot enforce a read-only connection")
+	}
+	c := &brokenConn{d: d, readOnly: cfg.ReadOnly}
 	if d.noBrowser {
 		return noBrowseConn{c}, nil
 	}
@@ -398,9 +484,17 @@ func (d *brokenDriver) invalid(msg string) error {
 	return dberr.New(dberr.KindInvalid, msg)
 }
 
+func (d *brokenDriver) readOnlyErr(msg string) error {
+	if d.wrongKindReadOnly {
+		return dberr.New(dberr.KindUnknown, msg)
+	}
+	return dberr.New(dberr.KindReadOnly, msg)
+}
+
 type brokenConn struct {
-	d      *brokenDriver
-	closed bool
+	d        *brokenDriver
+	readOnly bool
+	closed   bool
 }
 
 func (c *brokenConn) Ping(context.Context) error {
@@ -519,7 +613,12 @@ func (c *brokenConn) Columns(_ context.Context, database, table string) ([]schem
 	// is what makes this fake answer about it from anywhere, which is
 	// invariant 12's subject.
 	here := c.d.ignoreColumnsDatabase || c.holdsFixtures(database)
-	if _, ok := fixtureNamed(table); (!ok || !here) && !c.d.acceptUnknownTable {
+	_, isFixture := fixtureNamed(table)
+	// A table a CREATE TABLE landed for is there too — that is what the
+	// read-only checks read back. hideCreatedTables breaks exactly that, so
+	// their positive control has something to fail against.
+	exists := here && (isFixture || (c.d.created[table] && !c.d.hideCreatedTables))
+	if !exists && !c.d.acceptUnknownTable {
 		return nil, c.d.notFound("broken: no such table: " + table)
 	}
 	if c.d.noColumns {
@@ -545,19 +644,62 @@ func (c *brokenConn) Query(_ context.Context, stmt string, _ ...any) (driver.Cur
 		if c.d.badQuote {
 			name = alias
 		}
-		return &brokenCursor{meta: []driver.ColumnMeta{{Name: name}}}, nil
+		return &brokenCursor{d: c.d, meta: []driver.ColumnMeta{{Name: name}}}, nil
 	}
 	if c.d.failSeed {
 		return nil, dberr.New(dberr.KindSyntax, "broken: refusing "+stmt)
 	}
-	return &brokenCursor{}, nil
+	if c.d.failSelect && strings.HasPrefix(stmt, "SELECT ") {
+		// The quoting probe is handled above, so this is only ever the
+		// cursor check's read-back of a seeded table.
+		return nil, dberr.New(dberr.KindNetwork, "broken: refusing "+stmt)
+	}
+	if name, ok := createdTable(stmt); ok {
+		switch {
+		case c.readOnly && c.d.acceptWritesWhenReadOnly:
+			// The flag taken and not honoured: the write simply lands.
+		case c.readOnly && c.d.readOnlyRefusesButWrites:
+			// Refused where the caller can see it, taken where it cannot.
+			c.d.created[name] = true
+			return nil, c.d.readOnlyErr("broken: the connection is read-only")
+		case c.readOnly:
+			return nil, c.d.readOnlyErr("broken: the connection is read-only")
+		case c.d.failReadWriteProbe && name == readOnlyControl:
+			// Scoped to the control table: refusing every CREATE TABLE would
+			// abort the run during seeding and never reach the check.
+			return nil, dberr.New(dberr.KindSyntax, "broken: refusing "+stmt)
+		}
+		c.d.created[name] = true
+	}
+	return &brokenCursor{d: c.d}, nil
 }
 
-type brokenCursor struct{ meta []driver.ColumnMeta }
+type brokenCursor struct {
+	d     *brokenDriver
+	meta  []driver.ColumnMeta
+	calls int
+}
 
-func (c *brokenCursor) Columns() []driver.ColumnMeta                    { return c.meta }
-func (c *brokenCursor) Next(context.Context, int) ([]driver.Row, error) { return nil, nil }
-func (c *brokenCursor) Close() error                                    { return nil }
+func (c *brokenCursor) Columns() []driver.ColumnMeta { return c.meta }
+func (c *brokenCursor) Close() error                 { return nil }
+
+// Next returns nothing, which is a legitimate exhausted read: the fake's rows
+// live in memory and the suite's cursor check asserts the SIGNAL, not the
+// contents. The breaks are the three ways a driver can get that signal wrong.
+func (c *brokenCursor) Next(_ context.Context, n int) ([]driver.Row, error) {
+	c.calls++
+	switch {
+	case c.d.cursorEOF:
+		return nil, io.EOF
+	case c.d.cursorFailsPastTheEnd && c.calls > 1:
+		return nil, dberr.New(dberr.KindNetwork, "broken: reading past the end")
+	case c.d.cursorOverreads:
+		return make([]driver.Row, n+1), nil
+	case c.d.cursorRowsPastTheEnd && c.calls > 1:
+		return make([]driver.Row, 1), nil
+	}
+	return nil, nil
+}
 
 // noBrowseConn forwards Conn and deliberately does not promote Browse, so the
 // suite sees a driver whose type assertion to driver.Browser fails.

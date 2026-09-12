@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -292,6 +293,9 @@ func Run[T SuiteT[T]](t T, cfg Config) {
 	t.Run("columns", func(t T) { checkColumns(ctx, t, conn, database) })
 	t.Run("quote", func(t T) { checkQuote(ctx, t, conn) })
 	t.Run("ping", func(t T) { checkPing(ctx, t, cfg) })
+	t.Run("cursor_exhaustion", func(t T) { checkCursorExhaustion(ctx, t, conn) })
+	t.Run("required_fields", func(t T) { checkRequiredFields(t, cfg) })
+	t.Run("read_only", func(t T) { checkReadOnly(ctx, t, cfg, database) })
 
 	// Browser is optional (spec section 4), discovered by type assertion so a
 	// driver that cannot page a table is never forced to stub it.
@@ -544,6 +548,188 @@ func checkPing(ctx context.Context, t TestingT, cfg Config) {
 	if conn.Ping(ctx) == nil {
 		t.Errorf("Ping succeeded after Close; a connection the UI has dropped would " +
 			"report itself healthy forever")
+	}
+}
+
+// checkCursorExhaustion is Cursor.Next's own contract, spec'd since the
+// interface was written and never asserted: it returns FEWER than n rows,
+// with a NIL error, when the result is exhausted — not io.EOF.
+//
+// The difference is not cosmetic. dberr.From classifies an io.EOF as an
+// unknown failure, so a driver that signals exhaustion with it reports the
+// ordinary end of every result set as a database error; and a caller written
+// against the contract stops on the short read without ever reading the
+// error, so the two conventions disagree about whether anything went wrong
+// on literally every query.
+func checkCursorExhaustion(ctx context.Context, t TestingT, conn driver.Conn) {
+	t.Helper()
+	fx, _ := fixtureNamed(TableRows)
+	stmt := "SELECT " + conn.Quote(KeyColumn) + " FROM " + conn.Quote(TableRows)
+	cur, err := conn.Query(ctx, stmt)
+	if !succeeded(t, err, "reading %q back with %s", TableRows, stmt) {
+		return
+	}
+	defer func() { _ = cur.Close() }()
+
+	// One more than the table holds, so the very first read is the short one.
+	n := len(fx.rows) + 1
+	rows, err := cur.Next(ctx, n)
+	if err != nil {
+		t.Errorf("Cursor.Next(%d) over a table of %d rows reported %v; exhaustion is a short "+
+			"read with a NIL error, never io.EOF — dberr classifies an io.EOF as an unknown "+
+			"failure, so this driver reports the end of every result set as one",
+			n, len(fx.rows), err)
+		return
+	}
+	if len(rows) >= n {
+		t.Errorf("Cursor.Next(%d) returned %d rows; n is a ceiling, and a caller sizing a "+
+			"buffer from it is the one who finds out otherwise", n, len(rows))
+	}
+	// And again, past the end: a driver that signals with an error rather
+	// than a short read most often starts here, where it has nothing left to
+	// return at all.
+	rows, err = cur.Next(ctx, n)
+	if err != nil {
+		t.Errorf("Cursor.Next on an already-exhausted cursor reported %v; want no rows and a "+
+			"nil error", err)
+		return
+	}
+	if len(rows) != 0 {
+		t.Errorf("Cursor.Next returned %d rows from a cursor that was already exhausted; a "+
+			"caller that stops on a short read would have stopped, and these rows are lost",
+			len(rows))
+	}
+}
+
+// checkRequiredFields is the contract the connection form is built from: a
+// driver names the ConnConfig fields it cannot dial without, in the struct's
+// own lowercase vocabulary, so connections.save can refuse to persist a
+// connection that could never work without knowing which driver it is
+// talking to.
+//
+// Neither assertion is "the driver requires the right fields" — the suite
+// cannot know that, and a driver is the only thing that does. The first is
+// that a config the suite has ALREADY connected with is not reported as
+// incomplete, because a driver naming a field it does not need makes its own
+// working connections unsavable. The second is that whatever it does name is
+// spelled the way the caller reads the fields back; a name outside that
+// vocabulary reaches the user as the name of a form field that does not
+// exist.
+func checkRequiredFields(t TestingT, cfg Config) {
+	t.Helper()
+	if missing := cfg.Driver.RequiredFields(cfg.Open(t)); len(missing) > 0 {
+		t.Errorf("RequiredFields reports %v missing from the very config this suite connects "+
+			"with; the connection form refuses to save a config a driver reports on, so a "+
+			"driver that over-reports cannot save a connection that demonstrably works",
+			missing)
+	}
+	for _, name := range cfg.Driver.RequiredFields(driver.ConnConfig{}) {
+		if !connConfigField(name) {
+			t.Errorf("RequiredFields named %q, which is not the lowercased name of any "+
+				"driver.ConnConfig field; the caller hands these straight back to the user "+
+				"and has only the struct's own vocabulary to render them with", name)
+		}
+	}
+}
+
+// connConfigField reports whether name is a driver.ConnConfig field's own
+// name, lowercased. Read off the struct rather than listed here, so a field
+// added to ConnConfig does not quietly make this check wrong.
+func connConfigField(name string) bool {
+	rt := reflect.TypeOf(driver.ConnConfig{})
+	for i := range rt.NumField() {
+		if strings.ToLower(rt.Field(i).Name) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// The two tables checkReadOnly creates. Nothing seeds either, so whether
+// they exist afterwards is entirely down to which connection was allowed to
+// write. They are separate names because one is the assertion and the other
+// is its control, and a shared name would let the control's own write
+// satisfy the assertion.
+const (
+	readOnlyProbe   = "lantern_conf_readonly_probe"
+	readOnlyControl = "lantern_conf_readonly_control"
+)
+
+// checkReadOnly is the one contract spec section 4 says a driver must FAIL
+// OPEN over rather than accept and quietly not honour.
+//
+// ConnConfig.ReadOnly is a safety mechanism, not decoration: production
+// connections default to it and a write against one must fail outright.
+// Enforcing it is per-engine and, on a pooled *sql.DB, per CONNECTION —
+// SQLite needs a DSN pragma, and MySQL's equivalent is session state, which
+// is exactly what Conn's doc comment warns cannot be established by running
+// one statement after opening. A driver with no engine-enforced mechanism
+// must refuse the flag at Open, and that refusal is accepted here: a loud
+// failure is a safety mechanism, a lock icon beside a connection that still
+// writes is not.
+//
+// The verdict is read back over a SECOND, read-write connection to the same
+// database rather than over the guarded one. A driver that refuses the write
+// in its own code while the engine takes it underneath would otherwise pass:
+// what is being asserted is that the database did not change, not that the
+// user saw a refusal.
+func checkReadOnly(ctx context.Context, t TestingT, cfg Config, database string) {
+	t.Helper()
+	// One config, opened twice, because the two connections must reach the
+	// SAME database — which a second call to cfg.Open does not promise, since
+	// a file-backed driver is expected to make a fresh file each time.
+	cc := cfg.Open(t)
+	rw, err := cfg.Driver.Open(ctx, cc)
+	if !succeeded(t, err, "opening the read-write connection ReadOnly is checked against") {
+		return
+	}
+	defer func() { _ = rw.Close() }()
+
+	cc.ReadOnly = true
+	ro, err := cfg.Driver.Open(ctx, cc)
+	if err != nil {
+		// The only permitted alternative, and spec section 4 names it: a
+		// driver that cannot enforce read-only refuses the flag here rather
+		// than accepting it and allowing writes anyway.
+		return
+	}
+	defer func() { _ = ro.Close() }()
+
+	// The positive control runs FIRST, on a table of its own: a connection
+	// that cannot write at all, or a Columns that answers not-found for every
+	// name, would otherwise satisfy the absence asserted below while proving
+	// nothing about read-only.
+	control := cfg.DDL.create(readOnlyControl)
+	cur, err := rw.Query(ctx, control)
+	if !succeeded(t, err, "creating %q over a read-write connection (%s)",
+		readOnlyControl, control) {
+		return
+	}
+	_ = cur.Close()
+	if _, err := rw.Columns(ctx, database, readOnlyControl); err != nil {
+		t.Errorf("%q was just created over this read-write connection and Columns still "+
+			"cannot see it (%v), so an absence read back the same way proves nothing",
+			readOnlyControl, err)
+		return
+	}
+
+	stmt := cfg.DDL.create(readOnlyProbe)
+	cur, roErr := ro.Query(ctx, stmt)
+	if roErr == nil {
+		_ = cur.Close()
+		t.Errorf("a write (%s) was accepted on a connection opened with ConnConfig.ReadOnly; "+
+			"a driver that cannot enforce read-only must fail Open rather than accept the "+
+			"flag, because a flag that looks respected and is not is worse than no flag",
+			stmt)
+		return
+	}
+	refused(t, roErr, dberr.KindReadOnly,
+		"a write (%s) issued on a connection opened with ConnConfig.ReadOnly", stmt)
+
+	if _, err := rw.Columns(ctx, database, readOnlyProbe); err == nil {
+		t.Errorf("%q exists when read back over an INDEPENDENT read-write connection, so the "+
+			"refusal above was this driver declining to issue the write while the engine "+
+			"took it anyway", readOnlyProbe)
 	}
 }
 
