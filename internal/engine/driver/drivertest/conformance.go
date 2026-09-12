@@ -95,7 +95,25 @@ type Config struct {
 	// usable connection, and for a file-backed engine that means creating the
 	// file, since a driver is entitled to refuse one that does not exist.
 	Open func(TestingT) driver.ConnConfig
-	DDL  Fixtures
+	// Database names the database the connection Open describes is pointed
+	// at: the one seed's UNQUALIFIED CREATE TABLE statements land in, and
+	// therefore the one every later check has to name when it asks for the
+	// fixtures back.
+	//
+	// It is REQUIRED of any driver whose engine reports more than one, and
+	// the fallback below says why. Left empty, the suite takes the FIRST
+	// database Introspect reported, which is correct for an engine that has
+	// exactly one and correct for nothing else: MySQL's SHOW DATABASES and
+	// information_schema.SCHEMATA both answer in NAME order, so
+	// information_schema leads and the fixtures are somewhere else entirely.
+	// A suite that guessed would report thirty failures that all read like
+	// "the driver lost the fixtures" for a driver that did nothing wrong.
+	//
+	// It is a field rather than something read off ConnConfig because a
+	// driver is free to carry the database anywhere — ConnConfig.Database, a
+	// DSN option, a file path — and the suite does not get to assume which.
+	Database string
+	DDL      Fixtures
 }
 
 // The tables the suite seeds. Exported so a driver supplying its own DDL
@@ -263,11 +281,13 @@ func Run[T SuiteT[T]](t T, cfg Config) {
 		t.Fatalf("Introspect returned no databases; a driver must report at least one, " +
 			"since the UI has nothing to draw under the connection otherwise")
 	}
-	// The database the fixtures live in. A driver reporting several reports
-	// the one it connected to first; that is what Conn.Open was pointed at.
-	database := cat.Databases[0].Name
-
+	// Introspect is checked BEFORE the fixture database is resolved, because
+	// resolving it can abort the run — a driver reporting several databases
+	// and naming none leaves the suite nothing to look in — and the catalog's
+	// own invariants are exactly what a caller needs to see in that case.
 	t.Run("introspect", func(t T) { checkIntrospect(t, cfg.Driver, cat) })
+	database := fixtureDatabase(t, cfg, cat)
+
 	t.Run("tables", func(t T) { checkTables(ctx, t, conn, cat, database) })
 	t.Run("columns", func(t T) { checkColumns(ctx, t, conn, database) })
 	t.Run("quote", func(t T) { checkQuote(ctx, t, conn) })
@@ -286,6 +306,42 @@ func Run[T SuiteT[T]](t T, cfg Config) {
 	})
 	t.Run("cursor", func(t T) { checkCursor(ctx, t, br, database) })
 	t.Run("empty_table", func(t T) { checkEmptyTable(ctx, t, br, database) })
+}
+
+// fixtureDatabase resolves the database the fixtures were seeded into.
+//
+// Config.Database when the driver named one, and the first database
+// Introspect reported otherwise. The fallback is only ever right for an
+// engine with exactly one database (see Config.Database), so a driver that
+// reports several and names none is told so here rather than left to read
+// thirty downstream failures.
+func fixtureDatabase(t TestingT, cfg Config, cat *schema.Catalog) string {
+	t.Helper()
+	if cfg.Database == "" {
+		if len(cat.Databases) > 1 {
+			t.Fatalf("Introspect reported %d databases (%v) and Config.Database names none; "+
+				"the suite would look for its fixtures in %q simply because it is listed first",
+				len(cat.Databases), databaseNames(cat.Databases), cat.Databases[0].Name)
+		}
+		return cat.Databases[0].Name
+	}
+	for _, db := range cat.Databases {
+		if strings.EqualFold(db.Name, cfg.Database) {
+			return cfg.Database
+		}
+	}
+	t.Fatalf("Config.Database is %q but Introspect reported %v; the suite would look for its "+
+		"fixtures in a database the driver does not admit to having",
+		cfg.Database, databaseNames(cat.Databases))
+	return ""
+}
+
+func databaseNames(dbs []schema.Database) []string {
+	out := make([]string, len(dbs))
+	for i, db := range dbs {
+		out[i] = db.Name
+	}
+	return out
 }
 
 func connect(ctx context.Context, t TestingT, cfg Config) driver.Conn {

@@ -253,6 +253,16 @@ type brokenDriver struct {
 	eagerTables       bool
 	manyDatabases     bool
 
+	// databases, when non-empty, replaces the fake's single database: the
+	// driver reports exactly these names, in this order, and the fixtures
+	// live in fixtureDatabase rather than in whichever one comes first.
+	// Together they model the shape every multi-database engine has and
+	// SQLite does not — MySQL lists schemas in NAME order, so
+	// information_schema leads and the application's own schema sits
+	// somewhere in the middle.
+	databases       []string
+	fixtureDatabase string
+
 	failTables            bool
 	nilTables             bool
 	hideTables            bool
@@ -306,7 +316,38 @@ func newBrokenDriver() *brokenDriver { return &brokenDriver{} }
 func (d *brokenDriver) ID() string { return "broken" }
 
 func (d *brokenDriver) Capabilities() driver.Capabilities {
-	return driver.Capabilities{MultipleDatabases: false}
+	// From d.databases alone, never from databaseNames: manyDatabases is the
+	// break where a driver CLAIMS one database and reports several, so its
+	// capability bit has to stay false while its catalog grows.
+	return driver.Capabilities{MultipleDatabases: len(d.databases) > 1}
+}
+
+// databaseNames is every database this fake admits to having, in the order
+// Introspect reports them.
+func (d *brokenDriver) databaseNames() []string {
+	switch {
+	case len(d.databases) > 0:
+		return d.databases
+	case d.manyDatabases:
+		return []string{brokenDatabase, "other"}
+	}
+	return []string{brokenDatabase}
+}
+
+// fixtureDB is the database the seeded tables actually live in — the one
+// Config.Database has to name, and deliberately not always the first one
+// databaseNames reports.
+func (d *brokenDriver) fixtureDB() string {
+	switch {
+	case d.emptyDatabaseName:
+		// The fake's one database is unnamed, so that is where its fixtures
+		// are. Saying otherwise would add a second, unrelated failure to a
+		// break whose subject is the empty name.
+		return ""
+	case d.fixtureDatabase != "":
+		return d.fixtureDatabase
+	}
+	return brokenDatabase
 }
 
 func (d *brokenDriver) RequiredFields(driver.ConnConfig) []string { return nil }
@@ -381,16 +422,16 @@ func (c *brokenConn) Introspect(context.Context) (*schema.Catalog, error) {
 	if c.d.noDatabases {
 		return &schema.Catalog{}, nil
 	}
-	db := schema.Database{Name: brokenDatabase}
-	if c.d.emptyDatabaseName {
-		db.Name = ""
-	}
-	if c.d.eagerTables {
-		db.Tables = []schema.Table{}
-	}
-	cat := &schema.Catalog{Databases: []schema.Database{db}}
-	if c.d.manyDatabases {
-		cat.Databases = append(cat.Databases, schema.Database{Name: "other"})
+	cat := &schema.Catalog{}
+	for i, name := range c.d.databaseNames() {
+		db := schema.Database{Name: name}
+		if i == 0 && c.d.emptyDatabaseName {
+			db.Name = ""
+		}
+		if i == 0 && c.d.eagerTables {
+			db.Tables = []schema.Table{}
+		}
+		cat.Databases = append(cat.Databases, db)
 	}
 	return cat, nil
 }
@@ -399,11 +440,21 @@ func (c *brokenConn) knownDatabase(name string) bool {
 	if c.d.ignoreDatabase {
 		return true
 	}
-	if c.d.emptyDatabaseName && name == "" {
-		return true
+	for _, db := range c.d.databaseNames() {
+		if strings.EqualFold(name, db) || (c.d.emptyDatabaseName && name == "") {
+			return true
+		}
 	}
-	return strings.EqualFold(name, brokenDatabase) ||
-		(c.d.manyDatabases && strings.EqualFold(name, "other"))
+	return false
+}
+
+// holdsFixtures reports whether name is the database the seeded tables are
+// in. It is separate from knownDatabase because a multi-database engine has
+// databases that exist and are empty — answering about the fixtures for all
+// of them is the very defect Config.Database exists to stop the suite from
+// hiding.
+func (c *brokenConn) holdsFixtures(name string) bool {
+	return strings.EqualFold(name, c.d.fixtureDB())
 }
 
 func (c *brokenConn) Tables(_ context.Context, database string) ([]schema.Table, error) {
@@ -417,7 +468,7 @@ func (c *brokenConn) Tables(_ context.Context, database string) ([]schema.Table,
 		return nil, nil
 	}
 	out := []schema.Table{}
-	if strings.EqualFold(database, "other") {
+	if !c.holdsFixtures(database) {
 		return out, nil
 	}
 	if c.d.hideTables {
@@ -451,7 +502,11 @@ func (c *brokenConn) Columns(_ context.Context, database, table string) ([]schem
 	if !c.d.ignoreColumnsDatabase && !c.knownDatabase(database) {
 		return nil, c.d.notFound("broken: no such database: " + database)
 	}
-	if _, ok := fixtureNamed(table); !ok && !c.d.acceptUnknownTable {
+	// A fixture table is only in the fixture database. ignoreColumnsDatabase
+	// is what makes this fake answer about it from anywhere, which is
+	// invariant 12's subject.
+	here := c.d.ignoreColumnsDatabase || c.holdsFixtures(database)
+	if _, ok := fixtureNamed(table); (!ok || !here) && !c.d.acceptUnknownTable {
 		return nil, c.d.notFound("broken: no such table: " + table)
 	}
 	if c.d.noColumns {
@@ -530,6 +585,9 @@ func (c *brokenConn) Browse(_ context.Context, req driver.BrowseRequest) (*drive
 	}
 	if !c.knownDatabase(req.Database) {
 		return nil, c.d.notFound("broken: no such database: " + req.Database)
+	}
+	if !c.holdsFixtures(req.Database) {
+		return nil, c.d.notFound("broken: no such table: " + req.Table)
 	}
 
 	order := brokenOrder(req.Sort)
@@ -717,4 +775,79 @@ func brokenSeek(rows []fixtureRow, order []driver.SortKey, after []driver.Value,
 		}
 	}
 	return len(rows)
+}
+
+// E-1 repro: an engine that reports several databases reports them in its
+// own order, and for MySQL that is NAME order — information_schema first,
+// the fixtures nowhere near it. The suite used to take Databases[0] as "the
+// database the fixtures live in", which is true only of an engine that has
+// exactly one.
+func TestSuitePassesAMultiDatabaseDriverWhoseFixturesAreNotFirst(t *testing.T) {
+	d := newBrokenDriver()
+	d.databases = []string{"information_schema", "lantern_app", "mysql", "performance_schema"}
+	d.fixtureDatabase = "lantern_app"
+
+	r := &recordingT{}
+	func() {
+		defer catchFatal()
+		Run(r, Config{Driver: d, Open: d.open, Database: d.fixtureDatabase})
+	}()
+	if r.failed {
+		t.Fatalf("the suite failed a correct driver whose fixtures are not in Databases[0]:\n%s", r.text())
+	}
+}
+
+// runMultiDB drives the suite against the four-schema fake, with whatever
+// Config.Database the caller wants to test, and returns what it reported.
+func runMultiDB(database string) *recordingT {
+	d := newBrokenDriver()
+	d.databases = []string{"information_schema", "lantern_app", "mysql", "performance_schema"}
+	d.fixtureDatabase = "lantern_app"
+	r := &recordingT{}
+	func() {
+		defer catchFatal()
+		Run(r, Config{Driver: d, Open: d.open, Database: database})
+	}()
+	return r
+}
+
+// The control for the test above: the fake does not pass by answering the
+// same for every database. Point the suite at a schema that exists and is
+// empty — which is exactly what Databases[0] used to resolve to — and the
+// missing fixtures come back, the reviewer's original thirty failures in
+// one.
+func TestSuiteReportsFixturesMissingFromTheDatabaseItWasPointedAt(t *testing.T) {
+	r := runMultiDB("information_schema")
+	if !r.failed {
+		t.Fatal("the suite found its fixtures in a database that does not hold them; " +
+			"the fake answers the same for every database and proves nothing")
+	}
+	if !strings.Contains(r.text(), "did not list the seeded table") {
+		t.Errorf("failure did not name the missing fixtures:\n%s", r.text())
+	}
+}
+
+// A driver that reports several databases and names none leaves the suite
+// with nothing to look in, and guessing at the first is how this defect
+// shipped. Refusing says so once instead of thirty times.
+func TestSuiteRefusesAMultiDatabaseDriverThatNamesNoDatabase(t *testing.T) {
+	r := runMultiDB("")
+	if !r.failed {
+		t.Fatal("the suite guessed at a database for a driver that reports four")
+	}
+	if !strings.Contains(r.text(), "Config.Database names none") {
+		t.Errorf("failure did not say what is missing from the config:\n%s", r.text())
+	}
+}
+
+// And a Config.Database the driver does not report is a config error too —
+// the same thirty-failure cascade, from the other direction.
+func TestSuiteRefusesAConfigDatabaseTheDriverDoesNotReport(t *testing.T) {
+	r := runMultiDB("lantern_typo")
+	if !r.failed {
+		t.Fatal("the suite accepted a fixture database the driver never reported")
+	}
+	if !strings.Contains(r.text(), "does not admit to having") {
+		t.Errorf("failure did not name the mismatch:\n%s", r.text())
+	}
 }
