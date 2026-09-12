@@ -43,8 +43,14 @@ func TestSuiteFailsADriverThatViolatesEachInvariant(t *testing.T) {
 		{"Tables returns nil for an empty database", func(d *brokenDriver) { d.nilTables = true }, "nil"},
 		{"Tables omits a seeded table", func(d *brokenDriver) { d.hideTables = true }, "lantern_conf_something_else"},
 		{"columns are read eagerly by Tables", func(d *brokenDriver) { d.eagerColumns = true }, "tier two"},
-		{"Tables ignores its database argument", func(d *brokenDriver) { d.ignoreDatabase = true }, "database"},
-		{"Columns ignores its database argument", func(d *brokenDriver) { d.ignoreColumnsDatabase = true }, "database"},
+		// Both wants name the METHOD and the call, not just the word
+		// "database". They used to be the same string, so either break
+		// satisfied either case — and because the flag behind the first also
+		// reached Columns, deleting the suite's own check on Tables (the
+		// method this whole branch exists to make honest) left the package
+		// green.
+		{"Tables ignores its database argument", func(d *brokenDriver) { d.tablesIgnoreDatabase = true }, `tables("` + unknownDatabase + `")`},
+		{"Columns ignores its database argument", func(d *brokenDriver) { d.ignoreColumnsDatabase = true }, `columns("` + unknownDatabase + `"`},
 		{"an unknown database is refused with the wrong kind", func(d *brokenDriver) { d.wrongKindNotFound = true }, "not_found"},
 
 		{"Columns fails", func(d *brokenDriver) { d.failColumns = true }, "columns"},
@@ -263,11 +269,15 @@ type brokenDriver struct {
 	databases       []string
 	fixtureDatabase string
 
-	failTables            bool
-	nilTables             bool
-	hideTables            bool
-	eagerColumns          bool
-	ignoreDatabase        bool
+	failTables   bool
+	nilTables    bool
+	hideTables   bool
+	eagerColumns bool
+	// tablesIgnoreDatabase is scoped to Tables, and the scope is the point:
+	// it used to flip knownDatabase, which Columns consults too, so the
+	// break produced two failures and the suite's own check on Tables was
+	// pinned only by the one belonging to Columns.
+	tablesIgnoreDatabase  bool
 	ignoreColumnsDatabase bool
 	wrongKindNotFound     bool
 
@@ -437,9 +447,6 @@ func (c *brokenConn) Introspect(context.Context) (*schema.Catalog, error) {
 }
 
 func (c *brokenConn) knownDatabase(name string) bool {
-	if c.d.ignoreDatabase {
-		return true
-	}
 	for _, db := range c.d.databaseNames() {
 		if strings.EqualFold(name, db) || (c.d.emptyDatabaseName && name == "") {
 			return true
@@ -461,14 +468,14 @@ func (c *brokenConn) Tables(_ context.Context, database string) ([]schema.Table,
 	if c.d.failTables {
 		return nil, dberr.New(dberr.KindNetwork, "broken: tables")
 	}
-	if !c.knownDatabase(database) {
+	if !c.d.tablesIgnoreDatabase && !c.knownDatabase(database) {
 		return nil, c.d.notFound("broken: no such database: " + database)
 	}
 	if c.d.nilTables {
 		return nil, nil
 	}
 	out := []schema.Table{}
-	if !c.holdsFixtures(database) {
+	if !c.d.tablesIgnoreDatabase && !c.holdsFixtures(database) {
 		return out, nil
 	}
 	if c.d.hideTables {
