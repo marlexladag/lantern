@@ -255,3 +255,29 @@ func TestPredicateRefusesACursorWiderThanTheOrdering(t *testing.T) {
 		t.Fatal("a cursor wider than the ordering was accepted")
 	}
 }
+
+// Adversarial: appendArg drops exactly a nil argument, because a term built
+// for a NULL binds none. A Bind that answers (nil, nil) for a value that DID
+// render a placeholder therefore leaves the arguments one short of the
+// placeholders, with no error — executed on a Bind returning nil for an
+// empty text value, which produced a predicate with one argument for three
+// "?". database/sql reports that much later, as a statement fault, with
+// nothing pointing back at the Bind.
+//
+// SQLite's keysetArg never does this, so it is latent for the only shipped
+// driver. Bind is the seam a second driver implements.
+func TestPredicateRefusesABindThatReturnsNoParameterAndNoError(t *testing.T) {
+	nilBind := func(driver.Value) (any, error) { return nil, nil }
+	order := []Term{{Expr: `"a"`}, {Expr: `"b"`}}
+	// Non-NULL, so each renders a placeholder; the empty text is what a
+	// careless Bind is most likely to answer nil for.
+	after := []driver.Value{
+		{Kind: driver.ValueText, Text: ""},
+		{Kind: driver.ValueText, Text: "x"},
+	}
+	sql, args, err := Predicate(order, after, nilBind)
+	if err == nil {
+		t.Fatalf("a Bind returning (nil, nil) was accepted: %q carries %d placeholders "+
+			"and %d arguments", sql, strings.Count(sql, "?"), len(args))
+	}
+}

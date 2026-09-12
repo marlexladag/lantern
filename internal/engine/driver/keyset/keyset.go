@@ -36,6 +36,19 @@ type Term struct {
 // than an interface because exactly one behaviour varies between engines —
 // which values a cursor can carry — and a one-method interface with one
 // implementation is a hypothesis, not a design.
+//
+// It is never called for a NULL: a NULL's comparison is expressed
+// structurally, by IS NULL and IS NOT NULL, because `col > NULL` evaluates
+// to NULL and would drop every row rather than compare it.
+//
+// It must answer with a non-nil parameter or an error, NEVER (nil, nil). A
+// nil parameter is how Predicate spells "this term binds nothing", which is
+// true only of the NULL terms it builds itself — so a Bind that returns one
+// leaves the arguments short of the placeholders and produces a silently
+// wrong statement rather than a refusal. Predicate detects the violation
+// rather than rendering it; this is written down because a driver author
+// reads this line before writing the function, not the check that catches
+// them afterwards.
 type Bind func(driver.Value) (any, error)
 
 // Token fingerprints the ordering a page was actually produced under, so
@@ -189,8 +202,11 @@ func Predicate(order []Term, after []driver.Value, bind Bind) (string, []any, er
 
 // equalTerm renders "this column holds exactly the cursor's value".
 //
-// It cannot fail: every value reaching it was already accepted by afterTerm
-// for an earlier position in this same cursor.
+// It cannot fail, and that is a consequence of the chain's shape rather than
+// a hope: clause i calls afterTerm on position i, so by the time clause i
+// calls equalTerm on positions 0..i-1, each of those values has already been
+// bound successfully — and screened for the (nil, nil) violation — by the
+// clause below it.
 func equalTerm(t Term, v driver.Value, bind Bind) (string, any) {
 	if v.Kind == driver.ValueNull {
 		return t.Expr + " IS NULL", nil
@@ -224,6 +240,19 @@ func afterTerm(t Term, v driver.Value, bind Bind) (string, any, error) {
 	arg, err := bind(v)
 	if err != nil {
 		return "", nil, err
+	}
+	// Bind's contract, enforced rather than assumed. Both branches below
+	// render a placeholder, and appendArg drops a nil argument — that is how
+	// a NULL term, which renders none, keeps the two in step — so a Bind
+	// answering (nil, nil) here would put the args one behind the "?" for
+	// every later clause and return no error at all. KindUnknown rather than
+	// KindInvalid: nothing the user typed is wrong, the driver's own Bind
+	// broke its contract, and the UI has no action to offer for that.
+	if arg == nil {
+		return "", nil, dberr.New(dberr.KindUnknown,
+			"keyset: the driver's Bind returned no parameter and no error for a non-NULL "+
+				"cursor value; a term that binds nothing is how a NULL is rendered, so this "+
+				"would leave the bound parameters short of the placeholders")
 	}
 	if t.Desc {
 		// OR IS NULL because descending puts the NULLs after every value, and
