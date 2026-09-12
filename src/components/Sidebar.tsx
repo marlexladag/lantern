@@ -587,6 +587,20 @@ export function Sidebar({ onSelectTable, selectedTable }: SidebarProps) {
                       &#9656;
                     </span>
                     <span>{table.name}</span>
+                    {/*
+                      `Table.Kind` has crossed the wire since the first
+                      driver, and this tree drew the name alone — so a view
+                      and a table were the same row twice, and only the user
+                      remembering which was which told them apart.
+
+                      A word rather than a tint, and not aria-hidden: colour
+                      alone is no distinction for someone who cannot see the
+                      difference, and a row read aloud has to carry it too.
+                      `kind` is compared against the one value that changes
+                      the row, so a Kind this shell has never heard of draws
+                      as an ordinary table rather than as a blank badge.
+                    */}
+                    {table.kind === 'view' && <span className="sidebar-kind">View</span>}
                   </div>
                   {ui?.loading && (
                     <div className="sidebar-status" style={indent(depth + 1)}>

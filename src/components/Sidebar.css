@@ -200,3 +200,22 @@
   background: var(--color-sel);
   font-weight: 500;
 }
+
+/*
+ * The view marker. It borrows .sidebar-pk's badge shape so the two markers
+ * in this tree read as one family, and takes --color-dim with the neutral
+ * hairline rather than the accent: PK points at something notable in the
+ * data, while this only says what kind of thing the row is. Nothing here
+ * depends on the colour — the word is the distinction (spec §12), and this
+ * is what keeps it from shouting over the name beside it.
+ */
+.sidebar-kind {
+  font-size: var(--text-section);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-dim);
+  border: var(--hairline) solid var(--color-line);
+  border-radius: var(--radius-control-sm);
+  padding: 0 3px;
+}

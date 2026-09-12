@@ -1244,3 +1244,53 @@ it('renders an empty state when a multiple-database driver reports no databases'
   expect(screen.getByText('local')).toBeDefined(); // still a live sidebar
   expect(tablesMock).not.toHaveBeenCalled();
 });
+
+/*
+ * E2-3. `schema.Table` carries Kind, it crosses the wire, and this tree drew
+ * `table.name` and nothing else — so a view and a table were the same row
+ * twice, and a client that cannot say which is which is asking the user to
+ * remember.
+ *
+ * The two names sort adjacently on purpose: side by side in the list is
+ * exactly where two rows that draw identically stop being tellable apart,
+ * and a fixture with one table and one distant view would pass on the
+ * strength of the gap between them.
+ */
+it('tells a view apart from a table, and keeps both reachable from the keyboard', async () => {
+  const onSelectTable = vi.fn();
+  listMock.mockResolvedValue([conn]);
+  openMock.mockResolvedValue(openResult);
+  columnsMock.mockResolvedValue(oneColumn);
+  tablesMock.mockResolvedValue([
+    { name: 'users', kind: 'table' },
+    { name: 'users_recent', kind: 'view' },
+  ]);
+
+  render(<Sidebar onSelectTable={onSelectTable} />);
+  await waitFor(() => expect(screen.getByText('local')).toBeDefined());
+  await expandToTables();
+
+  const tableRow = (await screen.findByText('users')).closest('[role="treeitem"]') as HTMLElement;
+  const viewRow = screen.getByText('users_recent').closest('[role="treeitem"]') as HTMLElement;
+
+  // A word, not a colour. Whatever the treatment looks like, it has to reach
+  // someone who cannot distinguish a hue — and a screen reader reads this
+  // one out rather than skipping it.
+  expect(viewRow.textContent).toMatch(/view/i);
+  expect(tableRow.textContent).not.toMatch(/view/i);
+
+  /*
+   * Both rows still walk and activate from the keyboard (spec §12). The
+   * badge sits inside the row, so this is what catches it landing somewhere
+   * that changes what the tree's rows are — a row the arrow keys skip is
+   * worse than an undistinguished one.
+   */
+  const tree = screen.getByRole('tree');
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
+  expect(document.activeElement).toBe(tableRow);
+  act(() => { fireEvent.keyDown(tree, { key: 'ArrowDown' }); });
+  expect(document.activeElement).toBe(viewRow);
+
+  await act(async () => { fireEvent.keyDown(tree, { key: 'Enter' }); });
+  expect(onSelectTable).toHaveBeenCalledWith('s1', 'main', 'users_recent');
+});
