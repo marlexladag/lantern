@@ -823,3 +823,58 @@ func TestReadOnlyIsNotDefeatedByTheTableValuedPragmaForm(t *testing.T) {
 		t.Error("the write went through: the table is in the file")
 	}
 }
+
+// Columns takes a database and must honour it. This went unasserted long
+// enough for the same hole to exist in Tables and reach production, and it was
+// the conformance suite that finally asked.
+func TestColumnsRejectsAnUnknownDatabase(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)`)
+	_, err := c.Columns(context.Background(), "elsewhere", "a")
+	if err == nil {
+		t.Fatal("an unknown database was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindNotFound {
+		t.Errorf("kind = %q, want not_found", got.Kind)
+	}
+}
+
+// The assertion whose absence let the hole exist. A kind check alone cannot
+// see a parameter that is simply ignored: a driver that never reads `database`
+// returns the SAME successful answer for every value, and every not_found
+// assertion in the suite would still be about a missing TABLE. What proves the
+// parameter is read is that two different values produce two different
+// outcomes for the same table.
+func TestColumnsAnswersDifferentlyForADifferentDatabase(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)`)
+
+	right, err := c.Columns(context.Background(), "main", "a")
+	if err != nil {
+		t.Fatalf("the real database was refused: %v", err)
+	}
+	if len(right) != 2 {
+		t.Fatalf("columns = %d, want 2; the fixture is wrong and this test proves nothing", len(right))
+	}
+
+	wrong, wrongErr := c.Columns(context.Background(), "elsewhere", "a")
+	if wrongErr == nil {
+		t.Fatalf("the same table answered for a database that does not exist: %+v", wrong)
+	}
+}
+
+// SQLite folds identifiers on ASCII only, so "MAIN" names this database.
+func TestColumnsFoldsTheDatabaseNameOnASCII(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)`)
+	if _, err := c.Columns(context.Background(), "MAIN", "a"); err != nil {
+		t.Errorf("MAIN names this database and was refused: %v", err)
+	}
+}
+
+// An empty database name is not this database. Callers that permit one resolve
+// it to the default BEFORE asking, so that the name a cursor is issued under is
+// the name it is checked against — see Browse.
+func TestColumnsRejectsAnEmptyDatabaseName(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)`)
+	if _, err := c.Columns(context.Background(), "", "a"); err == nil {
+		t.Error("an empty database name was accepted")
+	}
+}

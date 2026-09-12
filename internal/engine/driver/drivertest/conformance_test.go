@@ -44,6 +44,7 @@ func TestSuiteFailsADriverThatViolatesEachInvariant(t *testing.T) {
 		{"Tables omits a seeded table", func(d *brokenDriver) { d.hideTables = true }, "lantern_conf_something_else"},
 		{"columns are read eagerly by Tables", func(d *brokenDriver) { d.eagerColumns = true }, "tier two"},
 		{"Tables ignores its database argument", func(d *brokenDriver) { d.ignoreDatabase = true }, "database"},
+		{"Columns ignores its database argument", func(d *brokenDriver) { d.ignoreColumnsDatabase = true }, "database"},
 		{"an unknown database is refused with the wrong kind", func(d *brokenDriver) { d.wrongKindNotFound = true }, "not_found"},
 
 		{"Columns fails", func(d *brokenDriver) { d.failColumns = true }, "columns"},
@@ -252,12 +253,13 @@ type brokenDriver struct {
 	eagerTables       bool
 	manyDatabases     bool
 
-	failTables        bool
-	nilTables         bool
-	hideTables        bool
-	eagerColumns      bool
-	ignoreDatabase    bool
-	wrongKindNotFound bool
+	failTables            bool
+	nilTables             bool
+	hideTables            bool
+	eagerColumns          bool
+	ignoreDatabase        bool
+	ignoreColumnsDatabase bool
+	wrongKindNotFound     bool
 
 	failColumns        bool
 	noColumns          bool
@@ -440,9 +442,14 @@ func brokenColumns() []schema.Column {
 	}
 }
 
-func (c *brokenConn) Columns(_ context.Context, _, table string) ([]schema.Column, error) {
+func (c *brokenConn) Columns(_ context.Context, database, table string) ([]schema.Column, error) {
 	if c.d.failColumns {
 		return nil, dberr.New(dberr.KindNetwork, "broken: columns")
+	}
+	// Honoured unless the driver is broken in exactly this way: the parameter
+	// is declared and ignored, which is invariant 12's whole subject.
+	if !c.d.ignoreColumnsDatabase && !c.knownDatabase(database) {
+		return nil, c.d.notFound("broken: no such database: " + database)
 	}
 	if _, ok := fixtureNamed(table); !ok && !c.d.acceptUnknownTable {
 		return nil, c.d.notFound("broken: no such table: " + table)

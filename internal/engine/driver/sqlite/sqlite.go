@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/marlexladag/lantern/internal/engine/driver/keyset"
+
 	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
 	"github.com/marlexladag/lantern/internal/engine/schema"
@@ -163,8 +165,27 @@ const tablesSQL = `SELECT name, type FROM sqlite_master
 WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
 ORDER BY name`
 
+// namesThisDatabase reports whether a caller's database argument names the one
+// database this connection has open.
+//
+// It folds with keyset.FoldIdent rather than strings.EqualFold, and the
+// difference is deliberate. EqualFold applies Unicode simple case folding;
+// SQLite's own identifier comparison folds A-Z and leaves every other byte
+// alone. Using the stricter-than-SQLite rule would be a false refusal, but
+// using the looser one is worse: it can fold two names SQLite considers
+// distinct into one, which answers about the wrong object rather than
+// refusing. FoldIdent already carries that reasoning for column names; this
+// is the same rule applied to the same kind of identifier.
+//
+// An empty name is NOT this database. Callers that allow an unnamed database
+// resolve it to the default before asking (see Browse), so that the name a
+// cursor is issued under is the name it is checked against.
+func (c *conn) namesThisDatabase(database string) bool {
+	return keyset.FoldIdent(database) == databaseName
+}
+
 func (c *conn) Tables(ctx context.Context, database string) ([]schema.Table, error) {
-	if !strings.EqualFold(database, databaseName) {
+	if !c.namesThisDatabase(database) {
 		return nil, dberr.New(dberr.KindNotFound, "no database named "+database)
 	}
 	rows, err := c.db.QueryContext(ctx, tablesSQL)
@@ -194,6 +215,17 @@ func (c *conn) Tables(ctx context.Context, database string) ([]schema.Table, err
 }
 
 func (c *conn) Columns(ctx context.Context, database, table string) ([]schema.Column, error) {
+	// The same rule Tables applies, for the same reason and with the same
+	// words. This parameter was declared and ignored until the conformance
+	// suite asked for it: on SQLite that is invisible, because there is one
+	// database, but on an engine where two schemas hold same-named tables it
+	// means answering about whichever table the connection's current schema
+	// resolves to, with no error and no way for a caller to tell. Two methods
+	// taking the same argument and disagreeing about it is worse than either
+	// rule on its own.
+	if !c.namesThisDatabase(database) {
+		return nil, dberr.New(dberr.KindNotFound, "no database named "+database)
+	}
 	// PRAGMA does not accept a bound parameter for the table name, so the
 	// identifier is quoted rather than parameterised.
 	stmt := "PRAGMA table_info(" + c.Quote(table) + ")"

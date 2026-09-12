@@ -68,7 +68,11 @@ func (c *conn) Browse(ctx context.Context, req driver.BrowseRequest) (*driver.Br
 	// missing table reports NotFound here: PRAGMA table_info returns zero
 	// rows rather than an error for a table that does not exist, and Columns
 	// already turns that into KindNotFound.
-	cols, err := c.Columns(ctx, req.Database, req.Table)
+	// `database`, not req.Database: the request's field may be empty, and
+	// Columns refuses an empty name like any other name that is not this
+	// database's. The resolution happened above precisely so that every use
+	// below sees one spelling.
+	cols, err := c.Columns(ctx, database, req.Table)
 	if err != nil {
 		return nil, err
 	}

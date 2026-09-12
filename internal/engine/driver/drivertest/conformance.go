@@ -418,6 +418,18 @@ func checkColumns(ctx context.Context, t TestingT, conn driver.Conn, database st
 	_, err := conn.Columns(ctx, database, unknownTable)
 	refused(t, err, dberr.KindNotFound,
 		"Columns(%q, %q), naming a table that does not exist", database, unknownTable)
+
+	// Invariant 12. Columns takes a database and must honour it, exactly as
+	// Tables does. A driver that declares the parameter and ignores it passes
+	// every test a single-database engine can write — which is how the same
+	// hole reached production in Tables and was only found by writing this
+	// suite. On an engine where two schemas hold same-named tables, ignoring
+	// it means answering about whichever table the connection's current
+	// schema resolves to, with no error and no way for a caller to tell.
+	_, err = conn.Columns(ctx, unknownDatabase, fixtures[0].name)
+	refused(t, err, dberr.KindNotFound,
+		"Columns(%q, %q), naming a database that does not exist while the TABLE does",
+		unknownDatabase, fixtures[0].name)
 }
 
 // quoteProbe is quoted once to discover what this engine's quote character
