@@ -46,6 +46,13 @@ type fakeConn struct {
 	introspectPanics bool
 	closeErr         error
 	closed           bool
+	// tablesScripted makes Tables answer with tables and a nil error instead
+	// of refusing. Nil tables is a deliberate CONTRACT VIOLATION the real
+	// driver cannot produce — Conn.Tables promises a non-nil empty slice —
+	// and modelling it is the only way to observe what the RPC seam does
+	// with one.
+	tablesScripted bool
+	tables         []schema.Table
 }
 
 func (c *fakeConn) Ping(context.Context) error { return c.pingErr }
@@ -61,6 +68,9 @@ func (c *fakeConn) Introspect(context.Context) (*schema.Catalog, error) {
 }
 
 func (c *fakeConn) Tables(context.Context, string) ([]schema.Table, error) {
+	if c.tablesScripted {
+		return c.tables, nil
+	}
 	return nil, errors.New("fakeConn: Tables not implemented")
 }
 

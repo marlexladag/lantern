@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
+	"github.com/marlexladag/lantern/internal/engine/store"
 )
 
 // seedTables makes the harness's fixture database contain EXACTLY the named
@@ -150,6 +151,81 @@ func TestSessionTablesRejectsAnUnknownDatabase(t *testing.T) {
 		t.Fatal("an unknown database was accepted")
 	} else if kind := rpcErrorKind(t, err); kind != dberr.KindNotFound {
 		t.Errorf("kind = %q, want not_found", kind)
+	}
+}
+
+// Adversarial, and the twin of TestSessionColumnsRejectsAnEmptyDatabaseName
+// one tier down: an empty database name is a name like any other, and this
+// seam must pass it through rather than substitute "the only database".
+// tablesParams' own contract comment says a seam that quietly defaulted here
+// would hide a driver that ignores the parameter — a comment stating a rule
+// that no test enforces is the shape this project has been bitten by four
+// times, and `if p.Database == "" { p.Database = "main" }` left every test in
+// the repo green.
+func TestSessionTablesRejectsAnEmptyDatabaseName(t *testing.T) {
+	h := newHarness(t)
+	sessionID := openSession(t, h)
+	handler, _ := h.srv.Handler("session.tables")
+	params := fmt.Sprintf(`{"session_id":%q,"database":""}`, sessionID)
+	if _, err := handler(context.Background(), json.RawMessage(params)); err == nil {
+		t.Fatal("an empty database name was accepted; the seam defaulted it")
+	} else if kind := rpcErrorKind(t, err); kind != dberr.KindNotFound {
+		t.Errorf("kind = %q, want not_found", kind)
+	}
+}
+
+// An omitted database is the same thing as an empty one — json.Unmarshal
+// leaves the field at its zero value — so the field being absent must not be
+// a way around the check above.
+func TestSessionTablesRejectsAnOmittedDatabase(t *testing.T) {
+	h := newHarness(t)
+	sessionID := openSession(t, h)
+	handler, _ := h.srv.Handler("session.tables")
+	params := fmt.Sprintf(`{"session_id":%q}`, sessionID)
+	if _, err := handler(context.Background(), json.RawMessage(params)); err == nil {
+		t.Fatal("a request with no database at all was accepted")
+	}
+}
+
+// The other half of the same seam: what comes BACK is the driver's own
+// answer, not a laundered one. session.tables deliberately does not
+// re-normalize a nil table list to [], because Conn.Tables already
+// guarantees non-nil and a second guard here would turn a driver that broke
+// that contract into a silently passing one — the shell would see [] and
+// nobody would ever learn the driver sends null. That comment had no test
+// either: adding the guard it forbids was undetectable.
+func TestSessionTablesDoesNotRenormalizeADriversNilTableList(t *testing.T) {
+	h := newHarness(t)
+	// A driver that BREAKS the non-nil contract, on purpose. The real SQLite
+	// driver cannot produce this, which is exactly why the seam's behaviour
+	// over it was never observed.
+	conn := &fakeConn{tablesScripted: true}
+	id := registerFakeDriver(t, conn, nil)
+	rec, err := h.st.Save(store.Saved{Name: "x", Driver: id, File: "unused"}, "")
+	if err != nil {
+		t.Fatalf("seed connection: %v", err)
+	}
+	out, err := h.call(t, "session.open", map[string]any{"connection_id": rec.ID})
+	if err != nil {
+		t.Fatalf("session.open: %v", err)
+	}
+	var opened struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(out, &opened); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	raw, err := h.call(t, "session.tables", map[string]any{
+		"session_id": opened.SessionID, "database": "anything",
+	})
+	if err != nil {
+		t.Fatalf("session.tables: %v", err)
+	}
+	if string(raw) != "null" {
+		t.Errorf("session.tables marshalled a driver's nil table list as %s; the seam must "+
+			"pass the driver's own answer through, so a driver that sends null is caught "+
+			"rather than laundered into []", raw)
 	}
 }
 

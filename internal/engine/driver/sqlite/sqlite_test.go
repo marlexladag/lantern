@@ -186,6 +186,23 @@ func TestTablesRejectsAnUnknownDatabase(t *testing.T) {
 	}
 }
 
+// An empty database name is not this database, and Tables must say so for
+// the same reason Columns does: the two take the same argument, and two
+// methods that disagree about it is worse than either rule on its own.
+// Callers that permit an unnamed database resolve it to the default BEFORE
+// asking, so the name a cursor is issued under is the name it is checked
+// against (see Browse).
+func TestTablesRejectsAnEmptyDatabaseName(t *testing.T) {
+	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY)`)
+	_, err := c.Tables(context.Background(), "")
+	if err == nil {
+		t.Fatal("an empty database name was accepted")
+	}
+	if got := dberr.From(err); got.Kind != dberr.KindNotFound {
+		t.Errorf("kind = %q, want not_found", got.Kind)
+	}
+}
+
 func TestPingSucceedsOnARealFile(t *testing.T) {
 	if err := open(t, fixture(t)).Ping(context.Background()); err != nil {
 		t.Fatalf("ping: %v", err)

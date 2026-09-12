@@ -137,6 +137,10 @@ type openResult struct {
 // as an error precisely so a driver that ignores the parameter cannot pass
 // for one that honours it, and a seam that quietly substituted "the only
 // database" here would hide exactly that.
+//
+// Enforced by TestSessionTablesRejectsAnEmptyDatabaseName and its omitted-field
+// twin, named here because the rule above went four releases with no test:
+// inserting the substitution it forbids left every gate in the repo green.
 type tablesParams struct {
 	SessionID string `json:"session_id"`
 	Database  string `json:"database"`
@@ -233,6 +237,11 @@ func RegisterSession(srv *rpc.Server, st *store.Store, sess *Sessions) {
 		// this seam would turn a driver that broke that contract into a
 		// silently passing one — the shell would see [] and nobody would
 		// ever learn the driver sends null.
+		//
+		// Enforced by TestSessionTablesDoesNotRenormalizeADriversNilTableList,
+		// which drives a deliberately contract-breaking fake through here:
+		// the real driver cannot produce a nil list, so without that fake
+		// adding the guard this forbids was undetectable.
 		return tables, nil
 	})
 
