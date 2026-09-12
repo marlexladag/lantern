@@ -919,6 +919,18 @@ func brokenValue(r fixtureRow, column string) driver.Value {
 // brokenCmp orders two rows on one term. NULL sorts before every value
 // ascending and after every value descending, which is what SQLite and MySQL
 // both do and what keyset.Predicate is written against.
+//
+// THE FIRST POSTGRESQL DRIVER MUST CHANGE THIS FUNCTION TOO. The ruling not
+// to abstract NULL ordering behind a dialect seam is deliberate and correct
+// — SQLite and MySQL would fill that seam identically, so it would ship
+// untested — and keyset.afterTerm names the divergence at the line that
+// assumes it: PostgreSQL puts NULLs LAST ascending by default, the opposite
+// of both. What that comment cannot know is that the same assumption is
+// baked in HERE, in the suite's own oracle. This is what the fake's expected
+// order is computed from, so a Postgres driver ordering NULLs its own way
+// would be told by a correctly-written suite that it had lost rows — and a
+// driver that got it wrong in the same direction as this comparator would be
+// passed. Changing only the predicate is half the change.
 func brokenCmp(a, b fixtureRow, k driver.SortKey) int {
 	var c int
 	switch {
