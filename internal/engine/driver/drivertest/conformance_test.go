@@ -177,6 +177,46 @@ func TestSuiteAcceptsADriverThatRefusesAReadOnlyConnection(t *testing.T) {
 	}
 }
 
+// Observe is how a driver's own test proves its offset fallback is REACHED
+// through the suite rather than merely implemented. It has to tell the two
+// paginations apart, so both directions are asserted: a keyset driver must
+// never report an offset continuation and an offset driver must never report
+// a keyset one, or an assertion built on it certifies whichever path the
+// driver did not take.
+func TestObserveNamesThePaginationTheDriverChose(t *testing.T) {
+	run := func(offsetPaging bool) map[PagingPath]int {
+		t.Helper()
+		d := newBrokenDriver()
+		d.offsetPaging = offsetPaging
+		seen := map[PagingPath]int{}
+		r := &recordingT{}
+		func() {
+			defer catchFatal()
+			Run(r, Config{Driver: d, Open: d.open, Observe: func(p PagingPath) { seen[p]++ }})
+		}()
+		if r.failed {
+			t.Fatalf("the suite failed a correct driver:\n%s", r.text())
+		}
+		return seen
+	}
+
+	keyset := run(false)
+	if keyset[PathKeyset] == 0 {
+		t.Error("a keyset-paging driver reported no keyset continuation")
+	}
+	if keyset[PathOffset] != 0 {
+		t.Errorf("a keyset-paging driver reported %d offset continuations", keyset[PathOffset])
+	}
+
+	offset := run(true)
+	if offset[PathOffset] == 0 {
+		t.Error("an offset-paging driver reported no offset continuation")
+	}
+	if offset[PathKeyset] != 0 {
+		t.Errorf("an offset-paging driver reported %d keyset continuations", offset[PathKeyset])
+	}
+}
+
 // CREATE TABLE differs enough between engines that a shared literal would be
 // a lie, so a driver may supply its own. This asserts the supplied statement
 // is the one actually issued — a Fixtures field that were quietly ignored
@@ -585,6 +625,9 @@ func (c *brokenConn) Tables(_ context.Context, database string) ([]schema.Table,
 	}
 	for _, fx := range fixtures {
 		t := schema.Table{Name: fx.name, Kind: schema.TableKindTable}
+		if fx.viewOf != "" {
+			t.Kind = schema.TableKindView
+		}
 		if c.d.eagerColumns {
 			t.Columns = brokenColumns()
 		}

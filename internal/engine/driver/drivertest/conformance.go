@@ -65,7 +65,7 @@ type SuiteT[T any] interface {
 
 // Fixtures carries the DDL the suite seeds with, in the engine's own dialect.
 //
-// Only CREATE TABLE is here. The rows are not: the suite has to KNOW exactly
+// Only CREATE statements are here. The rows are not: the suite has to KNOW exactly
 // what it seeded, because "every row exactly once" is a claim about a known
 // multiset, so it renders its own INSERT statements from data it holds and
 // keeps them to the literals every SQL dialect spells identically (integers,
@@ -75,16 +75,21 @@ type SuiteT[T any] interface {
 // A driver whose dialect accepts the default says nothing. One that does not
 // supplies its own, keyed by table name, and must keep the column names and
 // nullability the suite asserts on: KeyColumn is a unique, non-null integer
-// key and ValueColumn is a nullable text column.
+// key and ValueColumn is a nullable text column. TableView must stay a VIEW
+// over TableRows — see its own comment for what it is there to reach.
 type Fixtures struct {
 	Create map[string]string
 }
 
-func (f Fixtures) create(name string) string {
-	if stmt, ok := f.Create[name]; ok {
+func (f Fixtures) create(fx fixture) string {
+	if stmt, ok := f.Create[fx.name]; ok {
 		return stmt
 	}
-	return "CREATE TABLE " + name + " (" +
+	if fx.viewOf != "" {
+		return "CREATE VIEW " + fx.name + " AS SELECT " +
+			KeyColumn + ", " + ValueColumn + " FROM " + fx.viewOf
+	}
+	return "CREATE TABLE " + fx.name + " (" +
 		KeyColumn + " INTEGER PRIMARY KEY, " + ValueColumn + " TEXT)"
 }
 
@@ -115,7 +120,28 @@ type Config struct {
 	// DSN option, a file path — and the suite does not get to assume which.
 	Database string
 	DDL      Fixtures
+	// Observe, when non-nil, is called once for every page the suite asks a
+	// CONTINUATION of, naming the pagination the driver chose for it.
+	//
+	// It exists so a driver's own test can assert that its fallback is
+	// actually REACHED through the suite. Keyset and offset are alternatives
+	// and the suite follows whichever the driver picks, so a fixture set that
+	// stopped holding anything a given driver cannot page by key would turn
+	// that driver's offset path back into dead code — silently, with every
+	// check still green, which is how it stood before TableView was added.
+	// SQLite's own conformance test asserts both paths ran.
+	Observe func(PagingPath)
 }
+
+// PagingPath names one of the two paginations a driver may answer with. They
+// are ALTERNATIVES: a page carries a Keyset or an Offset, and which one it
+// carries is the driver saying whether this table can be paged by key.
+type PagingPath string
+
+const (
+	PathKeyset PagingPath = "keyset"
+	PathOffset PagingPath = "offset"
+)
 
 // The tables the suite seeds. Exported so a driver supplying its own DDL
 // writes the same names.
@@ -124,6 +150,13 @@ const (
 	TableTies  = "lantern_conf_ties"
 	TableNulls = "lantern_conf_nulls"
 	TableEmpty = "lantern_conf_empty"
+	// TableView is a VIEW over TableRows, and it is here to be the thing a
+	// driver CANNOT page by key. SQLite has no rowid for a view and no
+	// primary key to fall back on, so it takes the offset path — which
+	// without this fixture was dead code against every real driver, exercised
+	// only by the suite's own fake. MySQL's view fallback would have been
+	// uncovered the same way.
+	TableView = "lantern_conf_view"
 
 	// KeyColumn is unique and never null: it is what "every row exactly once"
 	// is counted by, and what a driver is expected to fall back on as its
@@ -158,14 +191,41 @@ type fixtureRow struct {
 type fixture struct {
 	name string
 	rows []fixtureRow
+	// viewOf names the table this fixture selects from, when it is a VIEW
+	// rather than a table. A view is seeded by its CREATE alone — the rows
+	// beneath it are already there — and its expected multiset is the source
+	// table's, taken by reference below rather than transcribed.
+	viewOf string
 }
 
 // fixtures is the whole of the suite's seed data.
-var fixtures = []fixture{
+var fixtures = withViewRows([]fixture{
 	{name: TableRows, rows: distinctRows(7)},
 	{name: TableTies, rows: tiedRows(3, tieGroup)},
 	{name: TableNulls, rows: nullableRows(8)},
 	{name: TableEmpty},
+	// Last, so the table it selects from exists by the time it is created.
+	{name: TableView, viewOf: TableRows},
+})
+
+// withViewRows gives every view the rows of the table beneath it. Taken from
+// the source rather than written out again: "every row exactly once" is a
+// claim about a known multiset, and a transcription would drift the moment
+// the source fixture is edited — leaving the paging invariants checking the
+// transcription, which is the failure Fixtures' own comment warns about one
+// level up.
+func withViewRows(fx []fixture) []fixture {
+	for i := range fx {
+		if fx[i].viewOf == "" {
+			continue
+		}
+		for _, src := range fx {
+			if src.name == fx[i].viewOf {
+				fx[i].rows = src.rows
+			}
+		}
+	}
+	return fx
 }
 
 func distinctRows(n int) []fixtureRow {
@@ -210,7 +270,14 @@ func fixtureNamed(name string) (fixture, bool) {
 // insert renders one INSERT per row. Per row rather than one multi-row
 // VALUES: the multi-row form is portable enough in practice, but a failure
 // then names a whole batch instead of the row that was refused.
+//
+// A view gets none: its rows are the source table's, already inserted, and
+// an INSERT into a view is a different feature with a different answer in
+// every dialect.
 func (fx fixture) insert() []string {
+	if fx.viewOf != "" {
+		return nil
+	}
 	out := make([]string, len(fx.rows))
 	for i, r := range fx.rows {
 		val := "NULL"
@@ -246,6 +313,7 @@ type pagingCase struct {
 
 var ascending = []driver.SortKey{{Column: ValueColumn}}
 var descending = []driver.SortKey{{Column: ValueColumn, Desc: true}}
+var byKey = []driver.SortKey{{Column: KeyColumn}}
 
 var pagingCases = []pagingCase{
 	{name: "default_sort", table: TableRows, pages: []int{2, 3, 7}},
@@ -259,6 +327,12 @@ var pagingCases = []pagingCase{
 	// descending, where the run is at the far end.
 	{name: "nulls_ascending", table: TableNulls, sort: ascending, pages: []int{3, 5, 8}},
 	{name: "nulls_descending", table: TableNulls, sort: descending, pages: []int{3, 5, 8}},
+	// The view, sorted by the key so the ordering is TOTAL without a
+	// tiebreaker: a driver that falls back to offset paging here has no
+	// keyset to make it total with, and an offset page over an ordering that
+	// is not total loses rows for reasons that have nothing to do with the
+	// driver.
+	{name: "view_sorted_by_key", table: TableView, sort: byKey, pages: []int{2, 3, 7}},
 }
 
 // Run drives cfg's driver through every invariant the suite knows.
@@ -303,9 +377,13 @@ func Run[T SuiteT[T]](t T, cfg Config) {
 	if !ok {
 		return
 	}
+	observe := cfg.Observe
+	if observe == nil {
+		observe = func(PagingPath) {}
+	}
 	t.Run("paging", func(t T) {
 		for _, c := range pagingCases {
-			t.Run(c.name, func(t T) { checkPaging(ctx, t, br, database, c) })
+			t.Run(c.name, func(t T) { checkPaging(ctx, t, br, database, c, observe) })
 		}
 	})
 	t.Run("cursor", func(t T) { checkCursor(ctx, t, br, database) })
@@ -363,7 +441,7 @@ func connect(ctx context.Context, t TestingT, cfg Config) driver.Conn {
 func seed(ctx context.Context, t TestingT, conn driver.Conn, ddl Fixtures) {
 	t.Helper()
 	for _, fx := range fixtures {
-		for _, stmt := range append([]string{ddl.create(fx.name)}, fx.insert()...) {
+		for _, stmt := range append([]string{ddl.create(fx)}, fx.insert()...) {
 			cur, err := conn.Query(ctx, stmt)
 			if err != nil {
 				t.Fatalf("seeding the fixtures, %q: %v", stmt, err)
@@ -699,7 +777,7 @@ func checkReadOnly(ctx context.Context, t TestingT, cfg Config, database string)
 	// that cannot write at all, or a Columns that answers not-found for every
 	// name, would otherwise satisfy the absence asserted below while proving
 	// nothing about read-only.
-	control := cfg.DDL.create(readOnlyControl)
+	control := cfg.DDL.create(fixture{name: readOnlyControl})
 	cur, err := rw.Query(ctx, control)
 	if !succeeded(t, err, "creating %q over a read-write connection (%s)",
 		readOnlyControl, control) {
@@ -713,7 +791,7 @@ func checkReadOnly(ctx context.Context, t TestingT, cfg Config, database string)
 		return
 	}
 
-	stmt := cfg.DDL.create(readOnlyProbe)
+	stmt := cfg.DDL.create(fixture{name: readOnlyProbe})
 	cur, roErr := ro.Query(ctx, stmt)
 	if roErr == nil {
 		_ = cur.Close()
@@ -735,12 +813,12 @@ func checkReadOnly(ctx context.Context, t TestingT, cfg Config, database string)
 
 // checkPaging is the invariant the browse work exists for: a table walked to
 // exhaustion yields every row exactly once, at every page size.
-func checkPaging(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase) {
+func checkPaging(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase, observe func(PagingPath)) {
 	t.Helper()
 	fx, _ := fixtureNamed(c.table)
 	want := fx.keys()
 	for _, limit := range c.pages {
-		got, complete := walk(ctx, t, br, database, c, limit)
+		got, complete := walk(ctx, t, br, database, c, limit, observe)
 		if !complete {
 			continue
 		}
@@ -754,7 +832,7 @@ func checkPaging(ctx context.Context, t TestingT, br driver.Browser, database st
 // walk pages one table to exhaustion, echoing back whatever the previous page
 // handed it — a keyset when the driver paginated by key, an offset when it
 // could not — and returns the key of every row it saw.
-func walk(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase, limit int) ([]string, bool) {
+func walk(ctx context.Context, t TestingT, br driver.Browser, database string, c pagingCase, limit int, observe func(PagingPath)) ([]string, bool) {
 	t.Helper()
 	fx, _ := fixtureNamed(c.table)
 	what := describe(c, limit)
@@ -801,10 +879,12 @@ func walk(ctx context.Context, t TestingT, br driver.Browser, database string, c
 			return got, false
 		}
 		if len(p.Keyset) > 0 {
+			observe(PathKeyset)
 			req.After, req.SortToken = p.Keyset, p.SortToken
 			continue
 		}
 		// No keyset: the driver paginated by offset and said so.
+		observe(PathOffset)
 		req.Offset = p.Offset
 	}
 }
