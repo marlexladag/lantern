@@ -15,9 +15,11 @@ package keyset
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
 	"github.com/marlexladag/lantern/internal/engine/schema"
 )
@@ -146,6 +148,23 @@ func FoldIdent(s string) string {
 // O(n²) terms in the number of sort keys. n is the caller's sort plus one
 // tiebreaker, so it is two or three in practice.
 func Predicate(order []Term, after []driver.Value, bind Bind) (string, []any, error) {
+	// The precondition is checked HERE, not trusted to the caller. Every
+	// clause below indexes after[i], so a cursor of the wrong width is an
+	// index-out-of-range panic inside code two drivers share, and
+	// rpc.dispatch turns a panic into a bare CodeInternal — no kind, no
+	// statement, nothing for either the user or the driver's author to act
+	// on. A driver is still expected to refuse a mismatched cursor before it
+	// gets here, where it can name the table and the sort (see sqlite's
+	// Browse); this is the floor under that, for the driver that forgets.
+	//
+	// A cursor WIDER than the ordering is refused for a different reason: it
+	// would not panic, it would silently ignore the extra values and page
+	// from a boundary the caller never described.
+	if len(after) != len(order) {
+		return "", nil, dberr.New(dberr.KindInvalid, fmt.Sprintf(
+			"keyset: the cursor carries %d value(s) but the ordering has %d term(s)",
+			len(after), len(order)))
+	}
 	// "?" is SQLite's and MySQL's placeholder. PostgreSQL needs $1, $2, ...
 	// which is positional and so cannot be a simple string swap — the
 	// predicate would have to know each parameter's index. Named here so the

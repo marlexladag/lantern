@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marlexladag/lantern/internal/engine/dberr"
 	"github.com/marlexladag/lantern/internal/engine/driver"
 	"github.com/marlexladag/lantern/internal/engine/schema"
 )
@@ -221,5 +222,36 @@ func TestColumnNamedDoesNotMergeColumnsUnicodeFoldingWould(t *testing.T) {
 	// And the ASCII folding SQLite does apply is still applied.
 	if col, ok := ColumnNamed(cols, "S"); !ok || col.Name != "s" {
 		t.Errorf("ColumnNamed(%q) = %+v, %v; SQLite folds A-Z", "S", col, ok)
+	}
+}
+
+// Adversarial: Predicate indexes after[i] once per ordering term, and the
+// only width guard lived in the SQLite driver. Shared code that panics
+// because a caller forgot a check is a panic in the SECOND driver's request
+// path — rpc.dispatch turns it into a bare CodeInternal with no kind and no
+// statement — so the precondition is validated where the indexing is.
+func TestPredicateRefusesACursorNarrowerThanTheOrdering(t *testing.T) {
+	order := []Term{{Expr: `"a"`}, {Expr: `"b"`}}
+	after := []driver.Value{{Kind: driver.ValueInt, Text: "1"}}
+	_, _, err := Predicate(order, after, bindText)
+	if err == nil {
+		t.Fatal("a cursor one value short of the ordering was accepted")
+	}
+	if got := dberr.From(err).Kind; got != dberr.KindInvalid {
+		t.Errorf("kind = %q, want %q", got, dberr.KindInvalid)
+	}
+}
+
+// The other direction is not a panic, which is why it needs saying: extra
+// cursor values are simply never read, so the predicate would page from a
+// boundary the caller did not describe and report nothing.
+func TestPredicateRefusesACursorWiderThanTheOrdering(t *testing.T) {
+	order := []Term{{Expr: `"a"`}}
+	after := []driver.Value{
+		{Kind: driver.ValueInt, Text: "1"},
+		{Kind: driver.ValueInt, Text: "2"},
+	}
+	if _, _, err := Predicate(order, after, bindText); err == nil {
+		t.Fatal("a cursor wider than the ordering was accepted")
 	}
 }
