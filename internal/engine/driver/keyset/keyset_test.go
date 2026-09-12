@@ -194,3 +194,32 @@ func TestFoldIdentFoldsASCIIOnly(t *testing.T) {
 		t.Error("two tables SQLite tells apart share a token")
 	}
 }
+
+// Adversarial: strings.EqualFold applies Unicode SIMPLE CASE FOLDING, which
+// merges "s" with U+017F LATIN SMALL LETTER LONG S. SQLite's identifier
+// comparison folds A-Z and nothing else, so a table may hold both columns at
+// once — and a lookup that merged them would answer about the WRONG column
+// rather than refuse, which is the failure FoldIdent's own doc comment
+// argues against four functions further up this file.
+//
+// The first assertion is the guard against pinning an encoding whose inputs
+// do not actually collide: if Go's folding ever stopped merging these two,
+// every check below would pass without testing anything.
+func TestColumnNamedDoesNotMergeColumnsUnicodeFoldingWould(t *testing.T) {
+	const longS = "ſ"
+	if !strings.EqualFold("s", longS) {
+		t.Fatal("the fixture no longer collides under Unicode folding, so this test proves nothing")
+	}
+	cols := []schema.Column{{Name: "s", Position: 0}, {Name: longS, Position: 1}}
+
+	if col, ok := ColumnNamed(cols, longS); !ok || col.Name != longS {
+		t.Errorf("ColumnNamed(%q) = %+v, %v; it answered about a different column", longS, col, ok)
+	}
+	if col, ok := ColumnNamed(cols, "s"); !ok || col.Name != "s" {
+		t.Errorf("ColumnNamed(%q) = %+v, %v; it answered about a different column", "s", col, ok)
+	}
+	// And the ASCII folding SQLite does apply is still applied.
+	if col, ok := ColumnNamed(cols, "S"); !ok || col.Name != "s" {
+		t.Errorf("ColumnNamed(%q) = %+v, %v; SQLite folds A-Z", "S", col, ok)
+	}
+}

@@ -238,10 +238,26 @@ func OrderBy(order []Term) string {
 	return " ORDER BY " + strings.Join(parts, ", ")
 }
 
-// ColumnNamed matches the way SQL engines do, which is case-insensitively.
+// ColumnNamed finds the column a caller named, folded the way the engine
+// compares identifiers — which is FoldIdent's rule, not strings.EqualFold's.
+//
+// The difference is the one FoldIdent's own doc comment argues, applied here
+// because this is where it bites. EqualFold applies Unicode simple case
+// folding, which merges "s" with U+017F LATIN SMALL LETTER LONG S; SQLite
+// folds A-Z and leaves every other byte alone, so a table may hold both
+// columns at once. Folding them together does not produce a false refusal,
+// which would at least be loud — it returns the OTHER column, and the caller
+// gets a page sorted by a column it did not name, with no error. Verified:
+// on a table with both, sorting by either name returned the same order.
+//
+// A driver whose engine folds identifiers differently must not assume this
+// rule. It is deliberately the stricter one: refusing a name this engine
+// would have resolved is recoverable, answering about the wrong object is
+// not.
 func ColumnNamed(cols []schema.Column, name string) (schema.Column, bool) {
+	folded := FoldIdent(name)
 	for _, col := range cols {
-		if strings.EqualFold(col.Name, name) {
+		if FoldIdent(col.Name) == folded {
 			return col, true
 		}
 	}

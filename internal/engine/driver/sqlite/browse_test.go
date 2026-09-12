@@ -1421,3 +1421,52 @@ func TestBrowseRejectsAnOffsetItCannotHonour(t *testing.T) {
 		t.Errorf("offset 3 returned %v, want the rows from id 4", got)
 	}
 }
+
+// The same defect one layer up, where it is visible as a wrong ANSWER rather
+// than a wrong lookup: sorting by "ſ" used to return the order for "s",
+// because the column resolver folded the two together. Two rows are enough —
+// the orders are exact reverses, so a resolver that confuses the columns
+// cannot produce the right one by accident.
+func TestBrowseSortsByTheColumnNamedNotOneUnicodeFoldingMergesIntoIt(t *testing.T) {
+	const longS = "ſ"
+	if !strings.EqualFold("s", longS) {
+		t.Fatal("the fixture no longer collides under Unicode folding, so this test proves nothing")
+	}
+	b := browseOn(t,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, "`+longS+`" TEXT)`,
+		`INSERT INTO t VALUES (1, 'b', 'a')`,
+		`INSERT INTO t VALUES (2, 'a', 'b')`)
+
+	order := func(column string) []string {
+		t.Helper()
+		rows := pageAll(t, b, driver.BrowseRequest{
+			Database: "main", Table: "t", Sort: []driver.SortKey{{Column: column}}, Limit: 10,
+		})
+		out := make([]string, len(rows))
+		for i, row := range rows {
+			out[i] = row[0].Text
+		}
+		return out
+	}
+
+	bySmallS, byLongS := order("s"), order(longS)
+	if want := []string{"2", "1"}; !equalStrings(bySmallS, want) {
+		t.Errorf("sorted by %q = %v, want %v", "s", bySmallS, want)
+	}
+	if want := []string{"1", "2"}; !equalStrings(byLongS, want) {
+		t.Errorf("sorted by %q = %v, want %v; the sort answered about the column "+
+			"Unicode folding merges it with", longS, byLongS, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
