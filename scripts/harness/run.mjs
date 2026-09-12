@@ -268,7 +268,7 @@ async function drive(page, { url, dbPath, out }) {
   record(
     'the form has an input for every field the engine requires',
     engineDrivers[0].required_fields.length > 0 &&
-      engineDrivers[0].required_fields.every((f) => fieldIds.includes(`conn-${f}`)),
+      engineDrivers[0].required_fields.every((f) => fieldIds.includes(`conn-field-${f}`)),
     `required ${JSON.stringify(engineDrivers[0].required_fields)}, inputs ${JSON.stringify(fieldIds)}`,
   );
 
@@ -288,7 +288,7 @@ async function drive(page, { url, dbPath, out }) {
     `alert said ${JSON.stringify(refusal)}; connections.save calls: ${(await saves()).length}`,
   );
 
-  await fill('#conn-file', dbPath);
+  await fill('#conn-field-file', dbPath);
   await page.clickLabel('Connect');
   await page.until(`${ROWS}.some((r) => r.text.startsWith('harness'))`, 'the saved connection');
 
