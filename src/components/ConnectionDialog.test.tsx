@@ -16,26 +16,52 @@ vi.mock('../lib/connections', async () => {
     ...actual,
     testConnection: vi.fn(),
     saveConnection: vi.fn(),
+    listDrivers: vi.fn(),
   };
 });
 
-import { testConnection, saveConnection, type Connection } from '../lib/connections';
+import { testConnection, saveConnection, listDrivers, type Connection, type DriverInfo } from '../lib/connections';
 import { ConnectionDialog } from './ConnectionDialog';
 
 const testMock = vi.mocked(testConnection);
 const saveMock = vi.mocked(saveConnection);
+const driversMock = vi.mocked(listDrivers);
+
+/*
+ * The engine's answer, as the dialog now receives it. Every test that opens
+ * the dialog gets this one unless it says otherwise, because the form no
+ * longer has fields of its own to render: `file` is here, and not in
+ * ConnectionDialog.tsx, which is the whole point of the task.
+ */
+const SQLITE: DriverInfo = {
+  id: 'sqlite',
+  required_fields: ['file'],
+  capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+};
+const MYSQL: DriverInfo = {
+  id: 'mysql',
+  required_fields: ['host', 'user'],
+  capabilities: { transactions: true, multiple_databases: true, editable_rows: true },
+};
 
 beforeEach(() => {
   testMock.mockReset();
   saveMock.mockReset();
+  driversMock.mockReset();
+  driversMock.mockResolvedValue([SQLITE]);
 });
+
+/** Resolves once the driver list has landed and the picker is drawn. */
+const driversLoaded = () => screen.findByRole('button', { name: 'SQLite' });
 
 // Use fireEvent.change, NOT `input.value = x`. React overrides the value
 // setter on controlled inputs, so a direct assignment never fires onChange and
 // the test would silently exercise an empty form.
-function fill(name: string, file: string) {
+async function fill(name: string, file: string) {
   fireEvent.change(screen.getByLabelText(/name/i), { target: { value: name } });
-  fireEvent.change(screen.getByLabelText(/file/i), { target: { value: file } });
+  // findBy, not getBy: the File input exists because SQLite's required_fields
+  // named it, so it appears only once drivers.list has answered.
+  fireEvent.change(await screen.findByLabelText(/file/i), { target: { value: file } });
 }
 
 it('renders nothing when closed', () => {
@@ -45,15 +71,19 @@ it('renders nothing when closed', () => {
 
 // A modal that opens without moving focus into it leaves Tab walking into
 // whatever is visually behind it first.
-it('moves focus to the Name field when it opens', () => {
+it('moves focus to the Name field when it opens', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  // Before the driver list has even landed: focus is the dialog's own job,
+  // not something that waits on the engine.
   expect(document.activeElement).toBe(screen.getByLabelText(/name/i));
+  await driversLoaded();
 });
 
 // A focus trap keeps Tab inside the dialog — without it, Tab from the last
 // control escapes into the sidebar behind the (still open) dialog.
-it('wraps Tab from the last focusable control to the first', () => {
+it('wraps Tab from the last focusable control to the first', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
   const dialog = screen.getByRole('dialog');
   const first = screen.getByRole('button', { name: /close/i });
   const last = screen.getByRole('button', { name: /^connect$/i });
@@ -64,8 +94,9 @@ it('wraps Tab from the last focusable control to the first', () => {
   expect(document.activeElement).toBe(first);
 });
 
-it('wraps Shift+Tab from the first focusable control to the last', () => {
+it('wraps Shift+Tab from the first focusable control to the last', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
   const dialog = screen.getByRole('dialog');
   const first = screen.getByRole('button', { name: /close/i });
   const last = screen.getByRole('button', { name: /^connect$/i });
@@ -76,8 +107,9 @@ it('wraps Shift+Tab from the first focusable control to the last', () => {
   expect(document.activeElement).toBe(last);
 });
 
-it('leaves a forward Tab alone when focus is not on the last control', () => {
+it('leaves a forward Tab alone when focus is not on the last control', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
   const dialog = screen.getByRole('dialog');
   const nameField = screen.getByLabelText(/name/i);
 
@@ -89,8 +121,9 @@ it('leaves a forward Tab alone when focus is not on the last control', () => {
   expect(document.activeElement).toBe(nameField);
 });
 
-it('leaves a backward Shift+Tab alone when focus is not on the first control', () => {
+it('leaves a backward Shift+Tab alone when focus is not on the first control', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
   const dialog = screen.getByRole('dialog');
   const nameField = screen.getByLabelText(/name/i);
 
@@ -116,7 +149,7 @@ function AddConnectionHarness() {
   );
 }
 
-it('returns focus to the element that opened the dialog after Escape, Cancel, or the close button', () => {
+it('returns focus to the element that opened the dialog after Escape, Cancel, or the close button', async () => {
   render(<AddConnectionHarness />);
   const opener = screen.getByRole('button', { name: /add connection/i });
 
@@ -132,6 +165,7 @@ it('returns focus to the element that opened the dialog after Escape, Cancel, or
     opener.focus();
     fireEvent.click(opener);
     expect(document.activeElement).toBe(screen.getByLabelText(/name/i));
+    await driversLoaded();
 
     close();
     expect(document.activeElement).toBe(opener);
@@ -146,7 +180,7 @@ it('returns focus to the element that opened the dialog after a successful save'
 
   opener.focus();
   fireEvent.click(opener);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => {
     screen.getByRole('button', { name: /^connect$/i }).click();
@@ -169,7 +203,7 @@ it('resets the form and the stale test verdict when it is reopened', async () =>
   const opener = screen.getByRole('button', { name: /add connection/i });
 
   fireEvent.click(opener);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
   fireEvent.click(screen.getByRole('switch', { name: /production connection/i }));
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
@@ -179,6 +213,7 @@ it('resets the form and the stale test verdict when it is reopened', async () =>
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
   fireEvent.click(opener);
+  await driversLoaded();
 
   expect((screen.getByLabelText(/name/i) as HTMLInputElement).value).toBe('');
   expect((screen.getByLabelText(/file/i) as HTMLInputElement).value).toBe('');
@@ -191,16 +226,18 @@ it('resets the form and the stale test verdict when it is reopened', async () =>
   expect(screen.getByRole('button', { name: 'Colour #3d7d55' }).getAttribute('aria-pressed')).toBe('true');
 });
 
-it('clears a validation error when it is reopened', () => {
+it('clears a validation error when it is reopened', async () => {
   render(<AddConnectionHarness />);
   const opener = screen.getByRole('button', { name: /add connection/i });
 
   fireEvent.click(opener);
+  await driversLoaded();
   act(() => { screen.getByRole('button', { name: /^connect$/i }).click(); });
   expect(screen.getByRole('alert').textContent).toMatch(/name is required/i);
 
   fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
   fireEvent.click(opener);
+  await driversLoaded();
 
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.getByLabelText(/name/i).getAttribute('aria-invalid')).toBeNull();
@@ -209,7 +246,7 @@ it('clears a validation error when it is reopened', () => {
 it('reports a successful test inline', async () => {
   testMock.mockResolvedValue({ ok: true });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -220,7 +257,7 @@ it('reports a successful test inline', async () => {
 it('reports a failed test with the engine message', async () => {
   testMock.mockResolvedValue({ ok: false, kind: 'not_found', error: 'database file does not exist' });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/nope.db');
+  await fill('local', '/tmp/nope.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -235,7 +272,7 @@ it('saves and reports the stored record to its caller', async () => {
   saveMock.mockResolvedValue(stored);
   const onSaved = vi.fn();
   render(<ConnectionDialog open onClose={() => {}} onSaved={onSaved} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -248,7 +285,7 @@ it('saves and reports the stored record to its caller', async () => {
 
 it('refuses to save without a name', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('', '/tmp/a.db');
+  await fill('', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -265,7 +302,7 @@ it('refuses to save without a name', async () => {
 // missing Name.
 it('refuses to save without a file', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '');
+  await fill('local', '');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -277,7 +314,7 @@ it('refuses to save without a file', async () => {
 // succeed should never be sent in the first place.
 it('refuses to test a connection without a file, without calling testConnection', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '');
+  await fill('local', '');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -288,7 +325,7 @@ it('refuses to test a connection without a file, without calling testConnection'
 it('falls back to a generic message when a failed test carries no error text', async () => {
   testMock.mockResolvedValue({ ok: false });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -304,7 +341,7 @@ it('reports an engine-level rejection from Test Connection using the db error me
     data: { kind: 'unknown', message: 'the engine went sideways' },
   });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -326,7 +363,7 @@ const NO_IPC = {
 it('renders the engine message for a Test Connection rejection that is not a database error', async () => {
   testMock.mockRejectedValue(ENGINE_DIED);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -340,7 +377,7 @@ it('renders the engine message for a Test Connection rejection that is not a dat
 it('renders the no-IPC-bridge message from Test Connection rather than [object Object]', async () => {
   testMock.mockRejectedValue(NO_IPC);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
 
@@ -352,7 +389,7 @@ it('disables Test Connection while a test is in flight', async () => {
   let resolveTest: ((r: { ok: boolean }) => void) | undefined;
   testMock.mockReturnValue(new Promise((resolve) => { resolveTest = resolve; }));
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   const button = screen.getByRole('button', { name: /test connection/i });
   act(() => { button.click(); });
@@ -366,7 +403,7 @@ it('does not start a second test while one is already running, because the butto
   let resolveTest: ((r: { ok: boolean }) => void) | undefined;
   testMock.mockReturnValue(new Promise((resolve) => { resolveTest = resolve; }));
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   const button = screen.getByRole('button', { name: /test connection/i });
   act(() => { button.click(); });
@@ -385,7 +422,7 @@ it('ignores a second Cmd+Enter while a save from the first is still in flight', 
   let resolveSave: ((c: typeof stored) => void) | undefined;
   saveMock.mockReturnValue(new Promise((resolve) => { resolveSave = resolve; }));
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   const dialog = screen.getByRole('dialog');
   act(() => { fireEvent.keyDown(dialog, { key: 'Enter', metaKey: true }); });
@@ -406,7 +443,7 @@ it('reports a failed save using the db error message and does not call onSaved',
   });
   const onSaved = vi.fn();
   render(<ConnectionDialog open onClose={() => {}} onSaved={onSaved} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -417,7 +454,7 @@ it('reports a failed save using the db error message and does not call onSaved',
 it('renders the engine message for a save rejection that is not a database error', async () => {
   saveMock.mockRejectedValue(ENGINE_DIED);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -428,7 +465,7 @@ it('renders the engine message for a save rejection that is not a database error
 it('renders the no-IPC-bridge message from a save rather than [object Object]', async () => {
   saveMock.mockRejectedValue(NO_IPC);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -448,7 +485,7 @@ it('discloses the driver text behind a collapsed Details control on a failed sav
     },
   });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
 
@@ -463,7 +500,7 @@ it('disables Connect while a save is in flight and ignores a second click', asyn
   const stored = { id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db', color: '#3d7d55', read_only: false };
   saveMock.mockReturnValue(new Promise((resolve) => { resolveSave = resolve; }));
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   const button = screen.getByRole('button', { name: /^connect$/i });
   act(() => { button.click(); });
@@ -479,7 +516,7 @@ it('lets a swatch be picked explicitly, overriding the default colour', async ()
     id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db', color: '#24707a', read_only: false,
   });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   const teal = screen.getByRole('button', { name: 'Colour #24707a' });
   fireEvent.click(teal);
@@ -496,7 +533,7 @@ it('toggling Production forces the danger colour and read-only, and reverts when
     id: 'a1', name: 'prod', driver: 'sqlite', file: '/tmp/p.db', color: '#9e4436', read_only: true,
   });
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('prod', '/tmp/p.db');
+  await fill('prod', '/tmp/p.db');
 
   const toggle = screen.getByRole('switch', { name: /production connection/i });
   expect(toggle.getAttribute('aria-checked')).toBe('false');
@@ -517,18 +554,20 @@ it('toggling Production forces the danger colour and read-only, and reverts when
   expect(screen.queryByText(/new sessions on this connection open read-only/i)).toBeNull();
 });
 
-it('calls onClose when Escape is pressed inside the dialog', () => {
+it('calls onClose when Escape is pressed inside the dialog', async () => {
   const onClose = vi.fn();
   render(<ConnectionDialog open onClose={onClose} onSaved={() => {}} />);
+  await driversLoaded();
 
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
 
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 
-it('calls onClose when the close button or Cancel is clicked', () => {
+it('calls onClose when the close button or Cancel is clicked', async () => {
   const onClose = vi.fn();
   render(<ConnectionDialog open onClose={onClose} onSaved={() => {}} />);
+  await driversLoaded();
 
   fireEvent.click(screen.getByRole('button', { name: /close/i }));
   fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
@@ -541,7 +580,7 @@ it('triggers Connect on Cmd+Enter and on Ctrl+Enter', async () => {
   saveMock.mockResolvedValue(stored);
   const onSaved = vi.fn();
   render(<ConnectionDialog open onClose={() => {}} onSaved={onSaved} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   await act(async () => {
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter', metaKey: true });
@@ -556,7 +595,7 @@ it('triggers Connect on Cmd+Enter and on Ctrl+Enter', async () => {
 
 it('ignores a bare Enter with no modifier, and any other key', async () => {
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
-  fill('local', '/tmp/a.db');
+  await fill('local', '/tmp/a.db');
 
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter' });
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'a' });
@@ -564,12 +603,153 @@ it('ignores a bare Enter with no modifier, and any other key', async () => {
   expect(saveMock).not.toHaveBeenCalled();
 });
 
-it('renders MySQL and MariaDB as disabled, and SQLite as the only selectable driver', () => {
+/*
+ * The driver picker, the fields, and what counts as missing all come from
+ * drivers.list now. The test this replaces asserted the opposite — two
+ * hardcoded, permanently disabled buttons — which is what made registering a
+ * driver in Go a change to this file as well.
+ */
+it('builds the driver picker from the engine', async () => {
+  driversMock.mockResolvedValue([SQLITE, MYSQL]);
   render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
 
-  expect((screen.getByRole('button', { name: 'MySQL' }) as HTMLButtonElement).disabled).toBe(true);
-  expect((screen.getByRole('button', { name: 'MariaDB' }) as HTMLButtonElement).disabled).toBe(true);
-  expect(screen.getByRole('button', { name: 'SQLite' }).getAttribute('aria-pressed')).toBe('true');
+  expect(await screen.findByRole('button', { name: /sqlite/i })).toBeDefined();
+  expect(await screen.findByRole('button', { name: /mysql/i })).toBeDefined();
+  // The first the engine reported is selected, so the form is usable the
+  // moment it is drawn.
+  expect(screen.getByRole('button', { name: /sqlite/i }).getAttribute('aria-pressed')).toBe('true');
+});
+
+// Picking a driver swaps the form to that driver's own requirements. Nothing
+// here knows what a MySQL connection needs; the engine said host and user.
+it('renders the fields the picked driver requires, and only those', async () => {
+  driversMock.mockResolvedValue([SQLITE, MYSQL]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+  expect(screen.queryByLabelText(/host/i)).toBeNull();
+
+  fireEvent.click(screen.getByRole('button', { name: /mysql/i }));
+
+  expect(screen.getByLabelText(/host/i)).toBeDefined();
+  expect(screen.getByLabelText(/user/i)).toBeDefined();
+  expect(screen.queryByLabelText(/file/i)).toBeNull();
+  expect(screen.getByRole('button', { name: /mysql/i }).getAttribute('aria-pressed')).toBe('true');
+  expect(screen.getByRole('button', { name: /sqlite/i }).getAttribute('aria-pressed')).toBe('false');
+});
+
+// A verdict about a SQLite file is not a verdict about a MySQL host. Same
+// reasoning as the reset-on-reopen effect, at a boundary the user crosses
+// without closing anything.
+it('drops a reachability verdict when another driver is picked', async () => {
+  driversMock.mockResolvedValue([SQLITE, MYSQL]);
+  testMock.mockResolvedValue({ ok: true });
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await fill('local', '/tmp/a.db');
+
+  await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
+  await screen.findByText(/reachable/i);
+
+  fireEvent.click(screen.getByRole('button', { name: /mysql/i }));
+
+  expect(screen.queryByText(/reachable/i)).toBeNull();
+});
+
+// A connection saves with what the engine named, under the engine's own
+// names — no mapping table in here to drift out of step with ConnConfig.
+it('sends each engine-named field under that name', async () => {
+  driversMock.mockResolvedValue([SQLITE, MYSQL]);
+  saveMock.mockResolvedValue({
+    id: 'a1', name: 'prod-db', driver: 'mysql', host: 'db.internal', user: 'root',
+    color: '#3d7d55', read_only: false,
+  });
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+  fireEvent.click(screen.getByRole('button', { name: /mysql/i }));
+
+  fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'prod-db' } });
+  fireEvent.change(screen.getByLabelText(/host/i), { target: { value: ' db.internal ' } });
+  fireEvent.change(screen.getByLabelText(/user/i), { target: { value: 'root' } });
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  const [connection] = saveMock.mock.calls[0];
+  expect(connection.driver).toBe('mysql');
+  expect(connection.host).toBe('db.internal');
+  expect(connection.user).toBe('root');
+  expect(connection.file).toBeUndefined();
+});
+
+/*
+ * Adversarial, and the reason this task exists: the dialog must refuse to
+ * save a connection missing a field THE ENGINE named — including one that
+ * appears in no TypeScript source anywhere. A hardcoded check cannot pass
+ * this test, which is exactly why it is the one worth writing.
+ *
+ * The concrete case behind it is MySQL: Go will say it needs host AND user,
+ * and a dialog checking only host would save a connection that can never
+ * dial — the same defect a user already reported here for SQLite and File.
+ */
+it('refuses to save when a field the engine requires is empty', async () => {
+  driversMock.mockResolvedValue([{ ...SQLITE, required_fields: ['file', 'wildcard'] }]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+
+  fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'local' } });
+  fireEvent.change(screen.getByLabelText(/file/i), { target: { value: '/tmp/a.db' } });
+  // 'wildcard' is deliberately left unset.
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  expect(saveMock).not.toHaveBeenCalled();
+  expect(screen.getByRole('alert').textContent?.toLowerCase()).toContain('wildcard');
+  expect(screen.getByLabelText(/wildcard/i).getAttribute('aria-invalid')).toBe('true');
+});
+
+// Every missing field at once, named the way the engine names them in its
+// own refusal, so the two surfaces read identically.
+it('names every missing field, not just the first', async () => {
+  driversMock.mockResolvedValue([SQLITE, MYSQL]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+  fireEvent.click(screen.getByRole('button', { name: /mysql/i }));
+  fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'prod' } });
+
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  expect(saveMock).not.toHaveBeenCalled();
+  expect(screen.getByRole('alert').textContent).toMatch(/host, user is required/i);
+});
+
+/*
+ * The fetch can fail — the engine can be down, or the shell can be a browser
+ * tab with no bridge at all. A dialog that renders an empty driver picker
+ * with no explanation is the blank-screen failure this project has hit
+ * before, so it must render, say why, and refuse to save.
+ */
+it('explains itself and refuses to save when the driver list cannot be fetched', async () => {
+  driversMock.mockRejectedValue(ENGINE_DIED);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+
+  expect((await screen.findByRole('alert')).textContent).toMatch(/the engine died/);
+  expect(screen.getByRole('dialog')).toBeDefined();
+  expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: /test connection/i }) as HTMLButtonElement).disabled).toBe(true);
+
+  // Cmd+Enter reaches handleConnect without passing the disabled attribute,
+  // so the guard inside it is the only thing standing here.
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter', metaKey: true });
+  });
+  expect(saveMock).not.toHaveBeenCalled();
+});
+
+// An engine that reports no drivers at all is the same failure wearing a
+// success: there is nothing to connect to, and silence would look like a
+// dialog that simply lost its buttons.
+it('says so when the engine reports no drivers at all', async () => {
+  driversMock.mockResolvedValue([]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+
+  expect((await screen.findByRole('alert')).textContent).toMatch(/no drivers/i);
+  expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 /*
@@ -595,10 +775,10 @@ function deferred<T>() {
 }
 
 /** Opens the dialog, fills it, and returns the Add connection button. */
-function openAndFill(name: string, file: string): HTMLElement {
+async function openAndFill(name: string, file: string): Promise<HTMLElement> {
   const opener = screen.getByRole('button', { name: /add connection/i });
   fireEvent.click(opener);
-  fill(name, file);
+  await fill(name, file);
   return opener;
 }
 
@@ -606,13 +786,14 @@ it('drops a reachability verdict that lands after a close and reopen', async () 
   const inFlight = deferred<{ ok: boolean }>();
   testMock.mockReturnValue(inFlight.promise);
   render(<AddConnectionHarness />);
-  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+  const opener = await openAndFill('old', '/tmp/OLD-FILE.db');
 
   fireEvent.click(screen.getByRole('button', { name: /test connection/i }));
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   expect(screen.queryByRole('dialog')).toBeNull();
 
   fireEvent.click(opener);
+  await driversLoaded();
   expect((screen.getByLabelText(/file/i) as HTMLInputElement).value).toBe('');
 
   await act(async () => { inFlight.resolve({ ok: true }); });
@@ -628,11 +809,12 @@ it('drops a test-connection throw that lands after a close and reopen', async ()
   const inFlight = deferred<{ ok: boolean }>();
   testMock.mockReturnValue(inFlight.promise);
   render(<AddConnectionHarness />);
-  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+  const opener = await openAndFill('old', '/tmp/OLD-FILE.db');
 
   fireEvent.click(screen.getByRole('button', { name: /test connection/i }));
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   fireEvent.click(opener);
+  await driversLoaded();
 
   await act(async () => {
     inFlight.reject({ code: -32020, message: 'the engine died' });
@@ -647,11 +829,12 @@ it('drops a save rejection that lands after a close and reopen', async () => {
   const inFlight = deferred<Connection>();
   saveMock.mockReturnValue(inFlight.promise);
   render(<AddConnectionHarness />);
-  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+  const opener = await openAndFill('old', '/tmp/OLD-FILE.db');
 
   fireEvent.click(screen.getByRole('button', { name: /^connect$/i }));
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   fireEvent.click(opener);
+  await driversLoaded();
 
   await act(async () => {
     inFlight.reject({ code: -32020, message: 'boom', data: { kind: 'not_found', message: 'database file does not exist' } });
@@ -670,11 +853,12 @@ it('drops a save that succeeds after a close and reopen, leaving the new form op
   const inFlight = deferred<Connection>();
   saveMock.mockReturnValue(inFlight.promise);
   render(<AddConnectionHarness />);
-  const opener = openAndFill('old', '/tmp/OLD-FILE.db');
+  const opener = await openAndFill('old', '/tmp/OLD-FILE.db');
 
   fireEvent.click(screen.getByRole('button', { name: /^connect$/i }));
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   fireEvent.click(opener);
+  await driversLoaded();
 
   await act(async () => {
     inFlight.resolve({ id: 'a1', name: 'old', driver: 'sqlite', file: '/tmp/OLD-FILE.db', color: '#3d7d55', read_only: false });
@@ -691,14 +875,56 @@ it('drops a save that succeeds after a close and reopen, leaving the new form op
 it('clears the form when it closes, not only when it opens', async () => {
   testMock.mockResolvedValue({ ok: true });
   render(<AddConnectionHarness />);
-  const opener = openAndFill('local', '/tmp/a.db');
+  const opener = await openAndFill('local', '/tmp/a.db');
 
   await act(async () => { screen.getByRole('button', { name: /test connection/i }).click(); });
   await screen.findByText(/reachable/i);
 
   fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
   fireEvent.click(opener);
+  await driversLoaded();
 
   expect((screen.getByLabelText(/name/i) as HTMLInputElement).value).toBe('');
   expect(screen.queryByText(/reachable/i)).toBeNull();
+});
+
+// The driver list is a request like any other, so it gets the same guard:
+// one abandoned by a close must not repaint the picker of the form that
+// replaced it.
+it('drops a driver list that lands after a close and reopen', async () => {
+  const inFlight = deferred<DriverInfo[]>();
+  driversMock.mockReturnValueOnce(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  fireEvent.click(opener);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(opener);
+  await driversLoaded();
+
+  await act(async () => { inFlight.resolve([MYSQL]); });
+
+  expect(screen.queryByRole('button', { name: /mysql/i })).toBeNull();
+});
+
+it('drops a driver-list failure that lands after a close and reopen', async () => {
+  const inFlight = deferred<DriverInfo[]>();
+  driversMock.mockReturnValueOnce(inFlight.promise);
+  render(<AddConnectionHarness />);
+  const opener = screen.getByRole('button', { name: /add connection/i });
+
+  fireEvent.click(opener);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  fireEvent.click(opener);
+  await driversLoaded();
+
+  await act(async () => {
+    inFlight.reject(ENGINE_DIED);
+    await inFlight.promise.catch(() => {});
+  });
+
+  // The reopened form is working: an error from a request nobody is waiting
+  // for any more must not disable it.
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(false);
 });

@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { saveConnection, testConnection, type Connection, type NewConnection } from '../lib/connections';
+import {
+  listDrivers, saveConnection, testConnection,
+  type Connection, type DriverInfo, type NewConnection,
+} from '../lib/connections';
 import { describeError, type ErrorDescription } from '../lib/errors';
 import { ErrorText } from './ErrorText';
 import './ConnectionDialog.css';
@@ -20,17 +23,38 @@ const SWATCHES = ['#3d7d55', '#24707a', '#4a6ea8', '#7a5aa0', '#a8792c', '#9e443
 const DEFAULT_COLOR = '#3d7d55';
 const DANGER_COLOR = '#9e4436';
 
-// SQLite is the only selectable driver today (see the segmented control
-// below), so this is a constant rather than state. It exists as a named
-// value, not inlined, so it is the one place `buildConnection` and
-// `missingDriverField` both read from.
-const DRIVER = 'sqlite' as const;
+/**
+ * Display names for driver ids whose conventional capitalization the id
+ * itself cannot carry. Cosmetic only, and entirely optional: a driver with
+ * no entry is shown under its own id, so registering one in Go puts it in
+ * this picker without anybody editing this file. That is the point of the
+ * whole exercise — an entry here is a nicety, not a registration.
+ */
+const DRIVER_LABELS: Record<string, string> = { sqlite: 'SQLite' };
+
+/**
+ * Placeholders for fields we happen to know a good example for. Same rule as
+ * DRIVER_LABELS: a field with no entry simply renders without one.
+ */
+const FIELD_PLACEHOLDERS: Record<string, string> = { file: '/path/to/database.db' };
+
+/**
+ * A field's label from the engine's name for it.
+ *
+ * The engine names fields by their lowercase ConnConfig field name, and this
+ * is the same transformation `checkConnectionIsSavable` applies in Go before
+ * naming one in a refusal — so whichever side refuses the save, the user
+ * reads the same word.
+ */
+function fieldLabel(field: string): string {
+  return field.charAt(0).toUpperCase() + field.slice(1);
+}
 
 // Every control a keyboard user can land on inside the dialog, in DOM
-// order — the segmented MySQL/MariaDB buttons are disabled and therefore
-// excluded automatically. Used both to seed focus on open and to trap Tab
-// at the two ends so it wraps within the dialog instead of escaping into
-// the sidebar behind it.
+// order — a disabled control (Connect and Test Connection, while the driver
+// list is missing) is excluded automatically. Used both to seed focus on
+// open and to trap Tab at the two ends so it wraps within the dialog instead
+// of escaping into the sidebar behind it.
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -38,7 +62,26 @@ type TestStatus = { kind: 'ok' } | { kind: 'error'; error: ErrorDescription } | 
 
 export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogProps) {
   const [name, setName] = useState('');
-  const [file, setFile] = useState('');
+  /**
+   * The engine's driver list, and the id picked out of it. Empty until
+   * drivers.list answers: this dialog has no idea what drivers exist, which
+   * is why adding one no longer means editing it.
+   */
+  const [drivers, setDrivers] = useState<DriverInfo[]>([]);
+  const [driverId, setDriverId] = useState('');
+  const [driversError, setDriversError] = useState<ErrorDescription | null>(null);
+  /**
+   * What the user has typed, keyed by the ENGINE's name for the field. The
+   * form has no fixed fields of its own, so neither does this.
+   */
+  const [values, setValues] = useState<Record<string, string>>({});
+  /**
+   * The fields the last refusal named, so each one can mark itself invalid.
+   * Separate from `formError` because one refusal can name several fields and
+   * matching on the rendered sentence to find out which is a trick that
+   * breaks the moment the sentence changes.
+   */
+  const [invalid, setInvalid] = useState<string[]>([]);
   const [color, setColor] = useState<string>(DEFAULT_COLOR);
   const [production, setProduction] = useState(false);
   const [testStatus, setTestStatus] = useState<TestStatus>(null);
@@ -84,13 +127,17 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     // more.
     generation.current++;
     setName('');
-    setFile('');
+    setValues({});
     setColor(DEFAULT_COLOR);
     setProduction(false);
     setTestStatus(null);
     setFormError(null);
+    setInvalid([]);
     setTesting(false);
     setSaving(false);
+    setDrivers([]);
+    setDriverId('');
+    setDriversError(null);
     if (open) {
       // A type-only narrowing, not a runtime check: `document.activeElement`
       // is always at least `document.body` in a mounted document, and
@@ -102,6 +149,35 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
       // sidebar behind the dialog before ever reaching the dialog's own
       // controls.
       nameInputRef.current?.focus();
+      // Asked on every open rather than once for the life of the app: the
+      // engine is a separate process that can be restarted under us, and an
+      // answer from a sidecar that has since died would be a form built on a
+      // driver list nothing can honour.
+      //
+      // Guarded by the same generation counter as the other two requests —
+      // an abandoned list landing on the form that replaced it would repaint
+      // the picker under the user's hands.
+      const gen = generation.current;
+      void (async () => {
+        try {
+          const list = await listDrivers();
+          if (gen !== generation.current) return;
+          setDrivers(list);
+          setDriverId(list[0]?.id ?? '');
+          if (list.length === 0) {
+            // Not an error the engine reported, but the same dead end: an
+            // empty picker with nothing said is indistinguishable from a
+            // dialog that lost its buttons.
+            setDriversError({ message: 'This engine has no drivers registered, so there is nothing to connect to.' });
+          }
+        } catch (err) {
+          if (gen !== generation.current) return;
+          // The dialog still renders. Refusing to draw at all is the
+          // blank-screen failure; drawing an empty picker with no
+          // explanation is the same failure, quieter.
+          setDriversError(describeError(err));
+        }
+      })();
     } else {
       openerRef.current?.focus();
       openerRef.current = null;
@@ -109,6 +185,16 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   }, [open]);
 
   if (!open) return null;
+
+  /**
+   * The picked driver, and what it says it cannot dial without. Both are
+   * derived, never stored: a second copy of the selected driver's own
+   * requirements is precisely the duplication this dialog just stopped
+   * keeping. Undefined until drivers.list answers — and for good, if it
+   * never does, which is what disables Connect below.
+   */
+  const selected = drivers.find((d) => d.id === driverId);
+  const requiredFields = selected?.required_fields ?? [];
 
   // No not-found branch: `handleKeyDown` only ever fires from a keydown
   // already dispatched on the rendered dialog element, so `dialogRef` is
@@ -119,29 +205,62 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   }
 
   function buildConnection(): NewConnection {
+    // Each field goes out under the name the ENGINE gave it: required_fields
+    // speaks ConnConfig's vocabulary, and store.Saved's JSON keys are the
+    // same words, so there is no mapping table here to drift out of step
+    // with either.
+    const fields: Record<string, string> = {};
+    for (const field of requiredFields) fields[field] = fieldValue(field);
     return {
       name: name.trim(),
-      driver: DRIVER,
-      file: file.trim(),
+      driver: driverId,
       color,
       read_only: production,
+      ...fields,
     };
   }
 
   /**
-   * The field this driver cannot dial without, if it is empty — mirrors
-   * internal/engine/driver's own RequiredFields on the Go side, so the
-   * dialog and the engine agree on what "required" means without one
-   * having to trust the other. Unlike Name (checked separately: every
-   * driver needs a name to save a record under, dialing does not care what
-   * it is called), this is driver-specific. Adding MySQL/MariaDB later is
-   * adding a case here, not rewriting this function.
+   * The fields the selected driver cannot dial without that are still empty.
+   *
+   * The list is the ENGINE's, fetched above — not a copy of it kept here.
+   * The copy this replaces could only ever disagree with Go: it hardcoded
+   * SQLite's File, so a driver needing a host and a user would have saved a
+   * connection that can never dial, which is the defect a user already
+   * reported against this dialog once, for SQLite.
+   *
+   * Name is checked separately, by handleConnect: every driver needs a name
+   * to save a record under, and dialing does not care what it is called.
    */
-  function missingDriverField(): string | null {
-    switch (DRIVER) {
-      case 'sqlite':
-        return file.trim() ? null : 'File';
-    }
+  function missingFields(): string[] {
+    return requiredFields.filter((field) => !fieldValue(field));
+  }
+
+  /**
+   * What has been typed into one engine-named field, trimmed. Shared by the
+   * check and the payload so "empty" and "what gets sent" cannot drift: a
+   * field that trimmed to nothing for the check but shipped its spaces
+   * anyway would be a connection saved with a whitespace host.
+   */
+  function fieldValue(field: string): string {
+    return (values[field] ?? '').trim();
+  }
+
+  /** Refuses the same way the engine does, naming what is missing. */
+  function refuseMissing(missing: string[]) {
+    setFormError({ message: `${missing.map(fieldLabel).join(', ')} is required` });
+    setInvalid(missing);
+  }
+
+  function selectDriver(id: string) {
+    setDriverId(id);
+    // A verdict about a SQLite file is not a verdict about a MySQL host, and
+    // a refusal naming the last driver's fields is not about this one's —
+    // the same reasoning the reset-on-open effect above is built on, at a
+    // boundary the user crosses without closing anything.
+    setTestStatus(null);
+    setFormError(null);
+    setInvalid([]);
   }
 
   function toggleProduction() {
@@ -153,17 +272,20 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   }
 
   async function handleTestConnection() {
-    // No guard against re-entry here: the only trigger is the button below,
-    // and a disabled <button> never dispatches a click at all — the browser
-    // enforces the single-flight invariant, so a redundant check here would
-    // be unreachable dead code.
-    const missing = missingDriverField();
-    if (missing) {
-      setFormError({ message: `${missing} is required` });
+    // No guard against re-entry, and none against a missing driver either:
+    // the only trigger is the button below, which is disabled both while a
+    // test is in flight and while there is no driver to test — and a
+    // disabled <button> never dispatches a click at all. The browser
+    // enforces both invariants, so a check here would be unreachable dead
+    // code.
+    const missing = missingFields();
+    if (missing.length > 0) {
+      refuseMissing(missing);
       setTestStatus(null);
       return;
     }
     setFormError(null);
+    setInvalid([]);
     setTesting(true);
     setTestStatus(null);
     const gen = generation.current;
@@ -194,17 +316,24 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     // reaches this function directly from a keydown handler, which bypasses
     // the Connect button's `disabled` attribute entirely.
     if (saving) return;
+    // Same bypass, second invariant: with no driver there is nothing to
+    // build a connection out of, and the Connect button's own `disabled`
+    // never sees a keyboard chord. The driver list's failure is already on
+    // screen, so this says nothing more.
+    if (!selected) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
       setFormError({ message: 'Name is required' });
+      setInvalid(['name']);
       return;
     }
-    const missing = missingDriverField();
-    if (missing) {
-      setFormError({ message: `${missing} is required` });
+    const missing = missingFields();
+    if (missing.length > 0) {
+      refuseMissing(missing);
       return;
     }
     setFormError(null);
+    setInvalid([]);
     setSaving(true);
     const gen = generation.current;
     try {
@@ -276,17 +405,30 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
             <span className="field-label" id="driver-label">
               Driver
             </span>
+            {/*
+              One button per driver the engine reported, in the order it
+              reported them (driver.IDs sorts, so that order is stable). This
+              used to be three literal buttons with two of them permanently
+              disabled, which made registering a driver in Go a change to
+              this file as well.
+            */}
             <div className="segmented" role="group" aria-labelledby="driver-label">
-              <button type="button" disabled aria-pressed="false">
-                MySQL
-              </button>
-              <button type="button" disabled aria-pressed="false">
-                MariaDB
-              </button>
-              <button type="button" aria-pressed="true">
-                SQLite
-              </button>
+              {drivers.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  aria-pressed={d.id === driverId}
+                  onClick={() => selectDriver(d.id)}
+                >
+                  {DRIVER_LABELS[d.id] ?? d.id}
+                </button>
+              ))}
             </div>
+            {driversError && (
+              <div role="alert" className="field-error">
+                <ErrorText description={driversError} />
+              </div>
+            )}
           </div>
 
           <div className="field">
@@ -302,25 +444,34 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               onChange={(e) => setName(e.target.value)}
               placeholder="local"
               aria-required="true"
-              aria-invalid={formError?.message === 'Name is required' ? 'true' : undefined}
+              aria-invalid={invalid.includes('name') ? 'true' : undefined}
             />
           </div>
 
-          <div className="field">
-            <label className="field-label" htmlFor="conn-file">
-              File<span aria-hidden="true"> *</span>
-            </label>
-            <input
-              id="conn-file"
-              className="text-input mono"
-              type="text"
-              value={file}
-              onChange={(e) => setFile(e.target.value)}
-              placeholder="/path/to/database.db"
-              aria-required="true"
-              aria-invalid={formError?.message === 'File is required' ? 'true' : undefined}
-            />
-          </div>
+          {/*
+            The form below the Name field is the engine's answer, not this
+            file's: one input per field the picked driver named. Monospace
+            for all of them — every one of these is a machine identifier (a
+            path, a host, an account), not prose.
+          */}
+          {requiredFields.map((field) => (
+            <div className="field" key={field}>
+              <label className="field-label" htmlFor={`conn-${field}`}>
+                {fieldLabel(field)}
+                <span aria-hidden="true"> *</span>
+              </label>
+              <input
+                id={`conn-${field}`}
+                className="text-input mono"
+                type="text"
+                value={values[field] ?? ''}
+                onChange={(e) => setValues((prev) => ({ ...prev, [field]: e.target.value }))}
+                placeholder={FIELD_PLACEHOLDERS[field]}
+                aria-required="true"
+                aria-invalid={invalid.includes(field) ? 'true' : undefined}
+              />
+            </div>
+          ))}
 
           <div className="field">
             <span className="field-label" id="colour-label">
@@ -382,7 +533,12 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
         </div>
 
         <div className="dialog-footer">
-          <button type="button" className="btn" onClick={() => void handleTestConnection()} disabled={testing}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void handleTestConnection()}
+            disabled={testing || !selected}
+          >
             Test Connection
           </button>
           {testStatus?.kind === 'ok' && (
@@ -401,7 +557,12 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="btn primary" onClick={() => void handleConnect()} disabled={saving}>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => void handleConnect()}
+            disabled={saving || !selected}
+          >
             Connect
             <span className="kbd-hint" aria-hidden="true">
               &#8984;&#9166;

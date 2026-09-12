@@ -14,6 +14,9 @@ const goSources = import.meta.glob('../../internal/engine/dberr/*.go', {
   eager: true,
 }) as Record<string, string>;
 import tsSource from './connections.ts?raw';
+// The Go declaration of the drivers.list payload, read as text for the same
+// reason: two declarations of one wire shape, with nothing linking them.
+import driversGoSource from '../../internal/api/drivers.go?raw';
 
 vi.mock('./engine', async () => {
   const actual = await vi.importActual<typeof import('./engine')>('./engine');
@@ -23,7 +26,7 @@ vi.mock('./engine', async () => {
 import { request } from './engine';
 import {
   listConnections, saveConnection, testConnection, deleteConnection,
-  openSession, loadTables, loadColumns, closeSession, asDbError,
+  openSession, loadTables, loadColumns, closeSession, listDrivers, asDbError,
 } from './connections';
 
 const requestMock = vi.mocked(request);
@@ -40,6 +43,13 @@ beforeEach(() => {
 });
 
 describe('method names and shapes', () => {
+  it('lists the drivers the engine has registered', async () => {
+    requestMock.mockResolvedValue([{ id: 'sqlite', required_fields: ['file'], capabilities: {} }]);
+    const got = await listDrivers();
+    expect(requestMock).toHaveBeenCalledWith('drivers.list');
+    expect(got[0].required_fields).toEqual(['file']);
+  });
+
   it('lists connections', async () => {
     requestMock.mockResolvedValue([]);
     await listConnections();
@@ -186,5 +196,39 @@ describe('the DbErrorKind union and the engine`s Kind constants', () => {
 
   it('contains exactly the same set of kinds as the Go engine', () => {
     expect([...tsKinds()].sort()).toEqual([...goKinds()].sort());
+  });
+});
+
+/*
+ * DriverInfo is the second two-declaration contract in this file — Go's
+ * struct tags in internal/api/drivers.go and the interface here — and the
+ * dialog now builds its whole form out of it. A key renamed on one side and
+ * not the other reads as `undefined` in the UI rather than as a failure, so
+ * it is checked the same way the Kind taxonomy is: by parsing both.
+ */
+describe('the DriverInfo interface and the engine`s DriverInfo struct', () => {
+  /** The `json:"…"` tags of the Go struct, in declaration order. */
+  function goKeys(): string[] {
+    const struct = /type DriverInfo struct \{([\s\S]*?)\n\}/.exec(driversGoSource);
+    expect(struct, 'DriverInfo struct not found in drivers.go').not.toBeNull();
+    return [...struct![1].matchAll(/json:"([^",]+)/g)].map((m) => m[1]);
+  }
+
+  /** The property names of this file's own `export interface DriverInfo`. */
+  function tsKeys(): string[] {
+    const declaration = /export interface DriverInfo \{([\s\S]*?)\n\}/.exec(tsSource);
+    expect(declaration, 'DriverInfo interface not found in connections.ts').not.toBeNull();
+    return [...declaration![1].matchAll(/^\s*(\w+)[?]?:/gm)].map((m) => m[1]);
+  }
+
+  // Two empty lists compare equal, so the real assertion below would pass
+  // against a regex that has quietly stopped matching.
+  it('finds both declarations to compare', () => {
+    expect(goKeys()).toContain('required_fields');
+    expect(tsKeys().length).toBe(goKeys().length);
+  });
+
+  it('declares exactly the same keys as the engine', () => {
+    expect([...tsKeys()].sort()).toEqual([...goKeys()].sort());
   });
 });

@@ -85,14 +85,33 @@ export interface TestResult {
   error?: string;
 }
 
+/** What an engine can do, so the UI knows what to hide (spec §4). */
+export interface Capabilities {
+  transactions: boolean;
+  multiple_databases: boolean;
+  editable_rows: boolean;
+}
+
 export interface OpenResult {
   session_id: string;
   catalog: Catalog;
-  capabilities: {
-    transactions: boolean;
-    multiple_databases: boolean;
-    editable_rows: boolean;
-  };
+  capabilities: Capabilities;
+}
+
+/**
+ * One driver, as the engine describes it.
+ *
+ * `required_fields` is the engine's answer to "what can this driver not dial
+ * without", in `ConnConfig`'s own vocabulary — the same words `store.Saved`
+ * uses as its JSON keys. The connection dialog builds its form from this
+ * rather than keeping a list of its own: a second list here could only ever
+ * be a guess at a decision Go makes, and the two would disagree the first
+ * time a driver's requirements were not what this file assumed.
+ */
+export interface DriverInfo {
+  id: string;
+  required_fields: string[];
+  capabilities: Capabilities;
 }
 
 /** The code the engine uses for every database error. */
@@ -116,6 +135,9 @@ export function asDbError(err: unknown): DbError | null {
   if (d.query !== undefined && typeof d.query !== 'string') return null;
   return d as DbError;
 }
+
+/** Every driver this engine has linked in, in a stable order. */
+export const listDrivers = () => request<DriverInfo[]>('drivers.list');
 
 export const listConnections = () => request<Connection[]>('connections.list');
 

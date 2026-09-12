@@ -224,24 +224,71 @@ async function drive(page, { url, dbPath, out }) {
   await page.until('!!document.querySelector(".sidebar")', 'the app to mount');
   await page.shot(out, '01-launched');
 
-  // Add connection -> fill -> Connect. React owns these inputs, so the value
-  // goes in through the native setter with an input event behind it; setting
-  // `.value` alone updates the DOM and leaves React's state untouched.
-  await page.clickLabel('Add connection');
-  await page.until('!!document.querySelector("#conn-file")', 'the connection dialog');
-  await page.eval(`
+  // React owns these inputs, so a value goes in through the native setter
+  // with an input event behind it; setting `.value` alone updates the DOM and
+  // leaves React's state untouched.
+  const fill = (id, value) => page.eval(`
     (() => {
       const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      const fill = (id, value) => {
-        const el = document.querySelector(id);
-        set.call(el, value);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      };
-      fill('#conn-name', 'harness');
-      fill('#conn-file', ${JSON.stringify(dbPath)});
+      const el = document.querySelector(${JSON.stringify(id)});
+      set.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true }));
     })()
   `);
+
+  /*
+   * The connection dialog. Its driver picker and its fields are drivers.list's
+   * answer now, not a list in ConnectionDialog.tsx — so both are checked
+   * against what the real sidecar actually replies, fetched here over the same
+   * bridge the app itself uses. jsdom can only check this against a mock; this
+   * is the half that proves the two ends agree.
+   */
+  await page.clickLabel('Add connection');
+  await page.until('!!document.querySelector(".segmented button")', 'the driver picker');
+  const engineDrivers = await page.eval(`
+    fetch('/__harness/rpc', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: 'drivers.list', params: null }),
+    }).then((r) => r.json()).then((f) => JSON.stringify(f.result))
+  `).then(JSON.parse);
+  const picker = await page
+    .eval(`JSON.stringify(Array.from(document.querySelectorAll('.segmented button')).map((b) => b.textContent.trim()))`)
+    .then(JSON.parse);
+  const fieldIds = await page
+    .eval(`JSON.stringify(Array.from(document.querySelectorAll('.dialog-body input[type=text]')).map((i) => i.id))`)
+    .then(JSON.parse);
   await page.shot(out, '02-dialog');
+  record(
+    'the driver picker is the engine\'s own list',
+    picker.length === engineDrivers.length &&
+      engineDrivers.every((d) => picker.some((label) => label.toLowerCase() === d.id)),
+    `engine ${JSON.stringify(engineDrivers.map((d) => d.id))}, picker ${JSON.stringify(picker)}`,
+  );
+  record(
+    'the form has an input for every field the engine requires',
+    engineDrivers[0].required_fields.length > 0 &&
+      engineDrivers[0].required_fields.every((f) => fieldIds.includes(`conn-${f}`)),
+    `required ${JSON.stringify(engineDrivers[0].required_fields)}, inputs ${JSON.stringify(fieldIds)}`,
+  );
+
+  // Saving with a required field empty. The refusal has to name the field and
+  // has to happen HERE, before a record that can never dial is persisted —
+  // the defect a user reported against this dialog, now enforced by what the
+  // engine said rather than by a copy of it in the shell.
+  await fill('#conn-name', 'harness');
+  await page.clickLabel('Connect');
+  await page.until(`!!document.querySelector('[role="alert"]')`, 'the refusal');
+  const refusal = await page.eval(`document.querySelector('[role="alert"]').textContent`);
+  const saves = async () => (await rpc()).filter((c) => c.method === 'connections.save');
+  await page.shot(out, '03-refusal');
+  record(
+    'a missing required field is refused by name, with nothing saved',
+    /file is required/i.test(refusal) && (await saves()).length === 0,
+    `alert said ${JSON.stringify(refusal)}; connections.save calls: ${(await saves()).length}`,
+  );
+
+  await fill('#conn-file', dbPath);
   await page.clickLabel('Connect');
   await page.until(`${ROWS}.some((r) => r.text.startsWith('harness'))`, 'the saved connection');
 
@@ -256,7 +303,7 @@ async function drive(page, { url, dbPath, out }) {
   // the tables hang straight off it and no database row is drawn.
   await page.eval(`${ROWS}.find((r) => r.text.startsWith('harness')).el.click()`);
   await page.until(`${ROWS}.some((r) => r.text === 'users')`, 'the tables');
-  await page.shot(out, '03-tables');
+  await page.shot(out, '04-tables');
 
   const rows = await page.rows();
   const calls = await tableCalls();
@@ -276,7 +323,7 @@ async function drive(page, { url, dbPath, out }) {
   await page.clickRow('users');
   await page.until('!!document.querySelector("canvas")', 'the grid canvas');
   await new Promise((r) => setTimeout(r, 500)); // one paint, not a poll on pixels
-  await page.shot(out, '04-rows');
+  await page.shot(out, '05-rows');
   const canvas = await page.eval(`
     (() => {
       const c = Array.from(document.querySelectorAll('canvas'))
@@ -311,7 +358,7 @@ async function drive(page, { url, dbPath, out }) {
     `!!Array.from(document.querySelectorAll('[role="status"]')).find((e) => e.textContent === 'No rows')`,
     '"No rows"',
   );
-  await page.shot(out, '05-empty-table');
+  await page.shot(out, '06-empty-table');
   record('an empty table says No rows', true, 'audit_log');
 
   // Collapse and re-expand the connection: the table list is cached, so this
@@ -341,7 +388,7 @@ async function drive(page, { url, dbPath, out }) {
   await page.key('ArrowDown', 40);
   await page.key('Enter', 13);
   await page.until(`!!document.querySelector('[aria-selected="true"]')`, 'a selected table');
-  await page.shot(out, '06-keyboard');
+  await page.shot(out, '07-keyboard');
   const selected = await page.eval(
     `${ROWS}.filter((r) => r.el.getAttribute('aria-selected') === 'true').map((r) => r.text).join()`,
   );
