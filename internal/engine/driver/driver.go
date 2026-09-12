@@ -61,7 +61,24 @@ type ConnConfig struct {
 	ReadOnly bool
 }
 
-// Conn is a live connection. Every driver implements exactly this.
+// Conn is one driver's handle on a database. Every driver implements exactly
+// this.
+//
+// It is NOT a single connection. Every implementation so far wraps a *sql.DB,
+// which is a pool, and that has consequences a caller has to know:
+//
+//   - Two calls on the same Conn may run on different underlying connections.
+//     Anything a driver needs to hold per connection — SQLite's PRAGMA
+//     settings, a server's session variables, a temporary table — must be
+//     established per connection (a DSN parameter, or a connector hook), never
+//     by running a statement once after opening.
+//   - A future Transactor (spec sections 7 and 8) cannot be built by running
+//     BEGIN through this interface, because the COMMIT may land on a different
+//     connection. It will need a connection pinned out of the pool.
+//
+// The name is kept because it is what the caller means: one thing, opened from
+// one saved connection, closed once. The comment exists so nobody reads the
+// name as a guarantee it does not make.
 type Conn interface {
 	Ping(ctx context.Context) error
 	// Introspect reads the DATABASE list only. It does NOT read table lists:

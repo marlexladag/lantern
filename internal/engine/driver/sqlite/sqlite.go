@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/marlexladag/lantern/internal/engine/driver/keyset"
 
@@ -26,6 +27,24 @@ import (
 
 // databaseName is what SQLite's single database is called in the catalog.
 const databaseName = "main"
+
+const (
+	// maxOpenConns caps the pool at what one desktop client talking to one
+	// database has genuine concurrent use for (a background schema fetch
+	// alongside a foreground query, say) — not left unbounded, which on a
+	// networked driver means one new connection to someone else's server per
+	// concurrent caller, with no ceiling.
+	maxOpenConns = 10
+	// maxIdleConns keeps most of that ceiling warm between queries instead of
+	// closing and reopening a connection — and, on SQLite, re-running the
+	// DSN's _pragma settings — after every idle moment between user actions.
+	maxIdleConns = 5
+	// connMaxLifetime recycles a pooled connection periodically rather than
+	// holding it forever. Invisible for a local file, but the difference
+	// between working and silently stuck once a driver dials a server that
+	// closes idle or long-lived connections on its own schedule.
+	connMaxLifetime = 5 * time.Minute
+)
 
 func init() { driver.Register(New()) }
 
@@ -81,6 +100,19 @@ func (drv) Open(ctx context.Context, cfg driver.ConnConfig) (driver.Conn, error)
 		_ = db.Close()
 		return nil, classify(err, "")
 	}
+	// A *sql.DB is a POOL, not a connection (see Conn's doc comment). Left
+	// unconfigured it opens as many connections as there are concurrent
+	// callers and keeps them forever.
+	//
+	// For SQLite the numbers barely matter — the cost is file handles, and
+	// modernc re-applies the DSN's _pragma settings to every new pooled
+	// connection, which is what keeps read-only enforcement holding across
+	// all of them. They are set anyway, because "unconfigured" is a decision
+	// nobody made, and because the next driver dials a server where the same
+	// omission means unbounded connections to someone else's machine.
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
 	return &conn{db: db, readOnly: cfg.ReadOnly}, nil
 }
 

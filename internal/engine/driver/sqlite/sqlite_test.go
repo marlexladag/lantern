@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/marlexladag/lantern/internal/engine/dberr"
@@ -47,14 +49,45 @@ func fixture(t *testing.T) string {
 	return path
 }
 
-func open(t *testing.T, path string) driver.Conn {
+// openAt opens path with the given ReadOnly setting and closes it when the
+// test ends. It is the one place every other open helper in this file routes
+// through, so a test that needs both a read-write and a read-only handle on
+// the SAME file — as the pool tests below do — gets them the same way every
+// other test opens a connection.
+func openAt(t *testing.T, path string, readOnly bool) driver.Conn {
 	t.Helper()
-	c, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path})
+	c, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path, ReadOnly: readOnly})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+func open(t *testing.T, path string) driver.Conn {
+	t.Helper()
+	return openAt(t, path, false)
+}
+
+// openReadOnly opens path read-only and closes it when the test ends.
+func openReadOnly(t *testing.T, path string) driver.Conn {
+	t.Helper()
+	return openAt(t, path, true)
+}
+
+// newTempDB returns the path to a fresh, empty, valid SQLite file that Open
+// will accept. database/sql opens lazily and SQLite would happily create a
+// missing file, so Open itself refuses one that does not exist yet (see
+// sqlite.go) — seeding a zero-byte file first is what a test wanting an
+// empty-but-real database has to do instead, and a zero-length file is a
+// valid empty SQLite database in its own right.
+func newTempDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "temp.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("seed empty file: %v", err)
+	}
+	return path
 }
 
 // connWith opens a fresh, empty SQLite file and runs each statement against
@@ -63,14 +96,7 @@ func open(t *testing.T, path string) driver.Conn {
 // views it needs.
 func connWith(t *testing.T, stmts ...string) driver.Conn {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "connwith.db")
-	// Open refuses a file that does not exist yet, so seed an empty one —
-	// the same zero-byte-file trick TestIntrospectOnAnEmptyDatabase... uses
-	// above, and a valid empty SQLite database in its own right.
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatalf("seed empty file: %v", err)
-	}
-	c := open(t, path)
+	c := open(t, newTempDB(t))
 	for _, s := range stmts {
 		cur, err := c.Query(context.Background(), s)
 		if err != nil {
@@ -611,17 +637,6 @@ func TestReadOnlyConnectionStillAllowsReads(t *testing.T) {
 // -- ReadOnly (C-1): PRAGMA query_only is enforced against statements, and
 // -- `PRAGMA query_only=0` is itself a statement ---------------------------
 
-// openReadOnly opens path read-only and closes it when the test ends.
-func openReadOnly(t *testing.T, path string) driver.Conn {
-	t.Helper()
-	c, err := New().Open(context.Background(), driver.ConnConfig{Driver: "sqlite", File: path, ReadOnly: true})
-	if err != nil {
-		t.Fatalf("open read-only: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Close() })
-	return c
-}
-
 // tableExists reopens path with a second, read-write connection and asks the
 // file itself. Asserting against the connection under test would prove only
 // that it declined to report the table; asserting against the file proves
@@ -876,5 +891,55 @@ func TestColumnsRejectsAnEmptyDatabaseName(t *testing.T) {
 	c := connWith(t, `CREATE TABLE a (id INTEGER PRIMARY KEY, name TEXT)`)
 	if _, err := c.Columns(context.Background(), "", "a"); err == nil {
 		t.Error("an empty database name was accepted")
+	}
+}
+
+// -- Pool configuration ------------------------------------------------------
+
+func TestOpenConfiguresThePool(t *testing.T) {
+	c := connWith(t).(*conn)
+	stats := c.db.Stats()
+	if stats.MaxOpenConnections <= 0 {
+		t.Error("the pool is unbounded; a driver that dials a server would open connections without limit")
+	}
+}
+
+// Adversarial: SQLite's read-only enforcement is applied per connection via
+// the DSN, so it must hold on EVERY connection the pool opens, not just the
+// first. Force the pool to hand out several concurrently.
+func TestReadOnlyHoldsAcrossEveryPooledConnection(t *testing.T) {
+	path := newTempDB(t)
+	rw := openAt(t, path, false)
+	if _, err := rw.Query(context.Background(), `CREATE TABLE t (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	ro := openAt(t, path, true)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	start := make(chan struct{})
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = ro.Query(context.Background(),
+				`INSERT INTO t (id) VALUES (`+strconv.Itoa(i)+`)`)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("write %d succeeded on a read-only connection", i)
+		}
+	}
+	// Check with an independent connection rather than the guarded one.
+	var n int
+	if err := rw.(*conn).db.QueryRow(`SELECT count(*) FROM t`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d rows landed through a read-only connection", n)
 	}
 }
