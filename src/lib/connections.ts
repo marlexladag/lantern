@@ -4,7 +4,7 @@
  * Everything funnels through `request` in ./engine, which is the single
  * `engine_request` command. Do not add a second channel.
  */
-import { request } from './engine';
+import { EngineErrorCode, request, type EngineError } from './engine';
 
 /**
  * The engine's error classification. The UI branches on this (spec §11).
@@ -136,8 +136,67 @@ export function asDbError(err: unknown): DbError | null {
   return d as DbError;
 }
 
-/** Every driver this engine has linked in, in a stable order. */
-export const listDrivers = () => request<DriverInfo[]>('drivers.list');
+/**
+ * One entry of the drivers.list payload as it actually arrived, or null when
+ * it is not one.
+ *
+ * Same shape of check as `asDbError` above, for the same reason: `request<T>`
+ * casts, so the `<T>` on the call below is a claim about the engine rather
+ * than a check of it, and the connection dialog renders both of these fields
+ * directly — `id` as a React child, `required_fields` through `.map`. Every
+ * shape refused here was driven through that dialog and unmounted the tree.
+ *
+ * `capabilities` is deliberately NOT checked. Nothing in the shell reads it
+ * yet, so refusing an otherwise dialable driver over a field nobody renders
+ * would cost the user a working driver to protect a `.map` that does not
+ * exist. Add the check with the first thing that reads it.
+ */
+function asDriverInfo(value: unknown): DriverInfo | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const d = value as { id?: unknown; required_fields?: unknown };
+  if (typeof d.id !== 'string') return null;
+  // Absent or null is the nil slice Go's encoding/json writes for a driver
+  // that requires nothing to dial — a legitimate answer, and the same
+  // marshalling that blanked this window once before (see `asTables` in
+  // Sidebar.tsx). Present-but-not-an-array is a different thing entirely:
+  // there is no form to build out of it.
+  const fields = d.required_fields ?? [];
+  if (!Array.isArray(fields) || fields.some((f) => typeof f !== 'string')) return null;
+  return { ...(value as DriverInfo), required_fields: fields };
+}
+
+/**
+ * Every driver this engine has linked in, in a stable order — and nothing
+ * else, whatever the engine put on the wire.
+ *
+ * A malformed ENTRY is dropped and the rest of the list stands: the drivers
+ * either side of it are still dialable, and one unreadable entry is not a
+ * reason to leave the user with no picker. A malformed RESPONSE — anything
+ * that is not an array — rejects instead of degrading to an empty list,
+ * because an empty list is a claim the dialog then makes out loud ("this
+ * engine has no drivers registered") and that claim would be false: the
+ * engine answered, with something this shell cannot read. Both endings land
+ * on a path the dialog already draws and already tests.
+ */
+export async function listDrivers(): Promise<DriverInfo[]> {
+  const payload = await request<unknown>('drivers.list');
+  if (!Array.isArray(payload)) {
+    // The same object shape `request` itself rejects with, so describeError
+    // renders this one the way it renders every other seam failure rather
+    // than falling through to `[object Object]`.
+    throw {
+      code: EngineErrorCode.Malformed,
+      message: 'The engine answered drivers.list with something that is not a list of drivers.',
+      data: payload,
+    } satisfies EngineError;
+  }
+  const drivers: DriverInfo[] = [];
+  for (const entry of payload) {
+    const driver = asDriverInfo(entry);
+    if (driver) drivers.push(driver);
+  }
+  return drivers;
+}
 
 export const listConnections = () => request<Connection[]>('connections.list');
 

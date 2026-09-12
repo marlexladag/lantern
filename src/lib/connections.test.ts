@@ -24,6 +24,9 @@ vi.mock('./engine', async () => {
 });
 
 import { request } from './engine';
+// The renderable half of the contract: whatever listDrivers rejects with has
+// to survive the trip through describeError that every failure surface makes.
+import { describeError } from './errors';
 import {
   listConnections, saveConnection, testConnection, deleteConnection,
   openSession, loadTables, loadColumns, closeSession, listDrivers, asDbError,
@@ -230,5 +233,95 @@ describe('the DriverInfo interface and the engine`s DriverInfo struct', () => {
 
   it('declares exactly the same keys as the engine', () => {
     expect([...tsKeys()].sort()).toEqual([...goKeys()].sort());
+  });
+});
+
+/*
+ * The payload validation, driven with the shapes a reviewer actually put on
+ * the wire. `request<T>` casts rather than checks, so every one of these
+ * reached the connection dialog's `.map` unexamined and took the whole React
+ * tree with it.
+ *
+ * The two halves of the decision are asserted separately, because they are
+ * different answers to different questions: one unreadable ENTRY costs that
+ * driver, an unreadable RESPONSE costs the call.
+ */
+describe('listDrivers validation', () => {
+  const sqlite = {
+    id: 'sqlite',
+    required_fields: ['file'],
+    capabilities: { transactions: true, multiple_databases: false, editable_rows: true },
+  };
+
+  it('keeps a well-formed list untouched', async () => {
+    requestMock.mockResolvedValue([sqlite]);
+    expect(await listDrivers()).toEqual([sqlite]);
+  });
+
+  /*
+   * A `null` element is not a hypothetical: a Go `[]*DriverInfo` with a nil
+   * in it marshals to exactly this, and `typeof null` is 'object', so the
+   * object check alone would wave it through into `entry.id`.
+   */
+  it('drops an entry that is not an object at all', async () => {
+    requestMock.mockResolvedValue([null, 'sqlite', sqlite]);
+    expect(await listDrivers()).toEqual([sqlite]);
+  });
+
+  // Dropped, not fatal: the drivers either side of it are still dialable, and
+  // a picker missing one entry is a smaller loss than a dialog with no
+  // drivers at all.
+  it('drops an entry whose id is not a string and keeps the rest', async () => {
+    requestMock.mockResolvedValue([{ id: { a: 1 }, required_fields: ['file'] }, sqlite]);
+    expect(await listDrivers()).toEqual([sqlite]);
+  });
+
+  /*
+   * `required_fields: 'file'` is the shape that produced
+   * `requiredFields.map is not a function`. A driver whose requirements
+   * cannot be read is one this shell would build an incomplete form for and
+   * save a connection that can never dial — so the whole entry goes, not
+   * just the field.
+   */
+  it('drops an entry whose required_fields is not an array of strings', async () => {
+    requestMock.mockResolvedValue([{ ...sqlite, required_fields: 'file' }, sqlite]);
+    expect(await listDrivers()).toEqual([sqlite]);
+
+    requestMock.mockResolvedValue([{ ...sqlite, required_fields: ['file', 7] }, sqlite]);
+    expect(await listDrivers()).toEqual([sqlite]);
+  });
+
+  /*
+   * The one malformed-looking shape that is not malformed. Go's encoding/json
+   * writes a nil slice as `null`, so this is how a driver that needs nothing
+   * to dial arrives — and dropping it would take a perfectly usable driver
+   * off the picker over its own honest answer.
+   */
+  it('reads a null required_fields as a driver that requires nothing', async () => {
+    requestMock.mockResolvedValue([{ id: 'memory', required_fields: null }]);
+    expect(await listDrivers()).toEqual([{ id: 'memory', required_fields: [] }]);
+  });
+
+  /*
+   * Not an empty list: that is a claim ("this engine registered no drivers")
+   * and it would be false. The engine answered with something this shell
+   * cannot read, which is what the Malformed code is for, and the dialog
+   * already renders a rejection.
+   */
+  it('rejects a response that is not an array at all', async () => {
+    requestMock.mockResolvedValue(null);
+    await expect(listDrivers()).rejects.toMatchObject({ code: -32004 });
+
+    requestMock.mockResolvedValue({ id: 'x' });
+    await expect(listDrivers()).rejects.toMatchObject({ code: -32004 });
+  });
+
+  // Rejecting with a bare string, or with anything describeError cannot
+  // recognize, is how a failure surface comes to read `[object Object]`.
+  it('rejects with something describeError can render', async () => {
+    requestMock.mockResolvedValue('nope');
+    const failure = await listDrivers().then(() => null, (err: unknown) => err);
+    expect(failure).not.toBeNull();
+    expect(describeError(failure).message).not.toContain('object Object');
   });
 });

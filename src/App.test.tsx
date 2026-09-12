@@ -31,6 +31,8 @@ vi.mock('./components/Sidebar', () => ({
     >
       <button onClick={() => onSelectTable('s1', 'main', 'users')}>select-users</button>
       <button onClick={() => onSelectTable('s2', 'shop', 'orders')}>select-orders</button>
+      {/* The one table the grid stub below refuses to render. */}
+      <button onClick={() => onSelectTable('s3', 'main', 'boom')}>select-boom</button>
     </div>
   ),
   ADD_CONNECTION_EVENT: 'lantern:add-connection',
@@ -49,9 +51,16 @@ vi.mock('./components/ResultGrid', () => ({
     sessionId: string;
     database: string;
     table: string;
-  }) => (
-    <div data-testid="result-grid" data-session={sessionId} data-database={database} data-table={table} />
-  ),
+  }) => {
+    // A render-time throw on demand, from a real child of App's own tree.
+    // What the fallback SAYS is ErrorBoundary's own suite; what this proves
+    // is that App is the thing standing between a child like this one and a
+    // blank window.
+    if (table === 'boom') throw new TypeError('rows.map is not a function');
+    return (
+      <div data-testid="result-grid" data-session={sessionId} data-database={database} data-table={table} />
+    );
+  },
 }));
 
 // ConnectionDialog has its own suite too. Stubbed down to the props App
@@ -197,4 +206,21 @@ it('lets the main pane stretch its content instead of centring it to content siz
   const empty = screen.getByText(PLACEHOLDER);
   expect(getComputedStyle(empty).alignItems).toBe('center');
   expect(getComputedStyle(empty).justifyContent).toBe('center');
+});
+
+/*
+ * E2-1. This project has blanked its own window twice from a render-time
+ * throw, and both times the type said the value could not be there. React
+ * unmounts the whole tree for any of them, so the boundary is what decides
+ * whether the next one is a readable failure or a white rectangle.
+ */
+it('shows a readable failure instead of blanking the window when a child throws', () => {
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  render(<App />);
+
+  fireEvent.click(screen.getByText('select-boom'));
+
+  expect(screen.getByRole('alert').textContent).toMatch(/rows\.map is not a function/);
+  expect(screen.getByRole('button', { name: /reload/i })).toBeDefined();
+  consoleError.mockRestore();
 });

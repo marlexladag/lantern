@@ -10,6 +10,7 @@ import {
   type TableSelection,
 } from './components/Sidebar';
 import { ConnectionDialog } from './components/ConnectionDialog';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ResultGrid } from './components/ResultGrid';
 
 export default function App() {
@@ -49,48 +50,57 @@ export default function App() {
   }, [openDialog]);
 
   return (
-    <div className="app-shell">
-      <header className="app-titlebar">
-        <h1>Lantern</h1>
-        <EngineStatus />
-        <span className="app-titlebar-spacer" />
-        <button type="button" className="app-add-connection" onClick={openDialog}>
-          Add connection
-        </button>
-      </header>
-      <div className="app-body">
-        <Sidebar onSelectTable={selectTable} selectedTable={selection} />
-        <main className="app-main">
-          {selection ? (
-            /*
-              Deliberately NOT keyed by the table. ResultGrid already resets
-              itself when its props name a different table, and bumps a
-              generation so a page still in flight for the old one cannot
-              land in the new one's rows — both covered by its own tests.
-              A `key` would remount instead, quietly retiring the mechanism
-              those tests exercise while looking identical on screen.
-            */
-            <ResultGrid
-              sessionId={selection.sessionId}
-              database={selection.database}
-              table={selection.table}
-            />
-          ) : (
-            <span className="app-main-empty">Select a table to see its data.</span>
-          )}
-        </main>
+    /*
+      Outside the shell rather than around the main pane alone: a throw from
+      the sidebar or the titlebar unmounts this tree just as completely as one
+      from the grid, and a fallback nested inside a shell whose own render
+      threw would never be reached. It wraps the ConnectionDialog too, which
+      is where the payload this branch validates arrives.
+    */
+    <ErrorBoundary>
+      <div className="app-shell">
+        <header className="app-titlebar">
+          <h1>Lantern</h1>
+          <EngineStatus />
+          <span className="app-titlebar-spacer" />
+          <button type="button" className="app-add-connection" onClick={openDialog}>
+            Add connection
+          </button>
+        </header>
+        <div className="app-body">
+          <Sidebar onSelectTable={selectTable} selectedTable={selection} />
+          <main className="app-main">
+            {selection ? (
+              /*
+                Deliberately NOT keyed by the table. ResultGrid already resets
+                itself when its props name a different table, and bumps a
+                generation so a page still in flight for the old one cannot
+                land in the new one's rows — both covered by its own tests.
+                A `key` would remount instead, quietly retiring the mechanism
+                those tests exercise while looking identical on screen.
+              */
+              <ResultGrid
+                sessionId={selection.sessionId}
+                database={selection.database}
+                table={selection.table}
+              />
+            ) : (
+              <span className="app-main-empty">Select a table to see its data.</span>
+            )}
+          </main>
+        </div>
+        <ConnectionDialog
+          open={dialogOpen}
+          onClose={closeDialog}
+          onSaved={() => {
+            closeDialog();
+            // Sidebar owns its own connection list and listens for this
+            // rather than being handed the new record directly, so App does
+            // not need to know how Sidebar's state is shaped.
+            window.dispatchEvent(new CustomEvent(CONNECTIONS_CHANGED_EVENT));
+          }}
+        />
       </div>
-      <ConnectionDialog
-        open={dialogOpen}
-        onClose={closeDialog}
-        onSaved={() => {
-          closeDialog();
-          // Sidebar owns its own connection list and listens for this
-          // rather than being handed the new record directly, so App does
-          // not need to know how Sidebar's state is shaped.
-          window.dispatchEvent(new CustomEvent(CONNECTIONS_CHANGED_EVENT));
-        }}
-      />
-    </div>
+    </ErrorBoundary>
   );
 }

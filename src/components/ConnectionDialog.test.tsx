@@ -20,12 +20,29 @@ vi.mock('../lib/connections', async () => {
   };
 });
 
+// Mocked one layer deeper than the block above, and only for the adversarial
+// payload fixtures at the end of this file: those drive a raw drivers.list
+// answer through the REAL listDrivers, so what the dialog receives is what
+// validation let through rather than what a stub decided to hand it.
+vi.mock('../lib/engine', async () => {
+  const actual = await vi.importActual<typeof import('../lib/engine')>('../lib/engine');
+  return { ...actual, request: vi.fn() };
+});
+
 import { testConnection, saveConnection, listDrivers, type Connection, type DriverInfo } from '../lib/connections';
+import { request } from '../lib/engine';
 import { ConnectionDialog } from './ConnectionDialog';
+
+// The real thing, validation included. The module mock above replaces
+// listDrivers for every other test here; `engineAnswers` below puts this one
+// back for the tests whose subject IS the validation.
+const { listDrivers: validatedListDrivers } =
+  await vi.importActual<typeof import('../lib/connections')>('../lib/connections');
 
 const testMock = vi.mocked(testConnection);
 const saveMock = vi.mocked(saveConnection);
 const driversMock = vi.mocked(listDrivers);
+const requestMock = vi.mocked(request);
 
 /*
  * The engine's answer, as the dialog now receives it. Every test that opens
@@ -48,6 +65,7 @@ beforeEach(() => {
   testMock.mockReset();
   saveMock.mockReset();
   driversMock.mockReset();
+  requestMock.mockReset();
   driversMock.mockResolvedValue([SQLITE]);
 });
 
@@ -750,6 +768,90 @@ it('says so when the engine reports no drivers at all', async () => {
 
   expect((await screen.findByRole('alert')).textContent).toMatch(/no drivers/i);
   expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+/*
+ * E2-1. A drivers.list answer the engine should never produce, and four
+ * shapes a reviewer produced anyway.
+ *
+ * Every one of these unmounted the React tree: `null` and a bare object took
+ * `drivers.map` with them, `required_fields: 'file'` threw
+ * `requiredFields.map is not a function`, and an object `id` threw "Objects
+ * are not valid as a React child". With no error boundary above it, each one
+ * was a blank window.
+ *
+ * The designed failure path — a rejection, and an empty list — is tested
+ * above and is untouched; this is the malformed-but-RESOLVED path, which had
+ * nothing standing on it at all.
+ */
+
+/** Puts a raw drivers.list payload on the wire, past no stub. */
+function engineAnswers(payload: unknown) {
+  requestMock.mockResolvedValue(payload);
+  driversMock.mockImplementation(validatedListDrivers);
+}
+
+/**
+ * The two things that must hold for every malformed payload: the dialog is
+ * still on screen with something readable on it, and it will not save —
+ * including through the Cmd+Enter chord, which never sees a `disabled`
+ * attribute.
+ */
+async function stillDrawnAndUnsaveable() {
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toBeTruthy();
+  expect(screen.getByRole('dialog')).toBeDefined();
+  expect((screen.getByRole('button', { name: /^connect$/i }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: /test connection/i }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Enter', metaKey: true });
+  });
+  expect(saveMock).not.toHaveBeenCalled();
+}
+
+it('survives a drivers.list that answers null', async () => {
+  engineAnswers(null);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await stillDrawnAndUnsaveable();
+});
+
+it('survives a drivers.list that answers an object instead of a list', async () => {
+  engineAnswers({ id: 'x' });
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await stillDrawnAndUnsaveable();
+});
+
+it('survives a driver whose required_fields is a string', async () => {
+  engineAnswers([{ ...SQLITE, required_fields: 'file' }]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await stillDrawnAndUnsaveable();
+});
+
+it('survives a driver whose id is an object', async () => {
+  engineAnswers([{ ...SQLITE, id: { a: 1 } }]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await stillDrawnAndUnsaveable();
+});
+
+/*
+ * The other half of the decision, on screen: one unreadable entry costs that
+ * driver and nothing else. A validator that refused the whole list would
+ * pass all four tests above and still take a working SQLite picker away from
+ * the user.
+ */
+it('keeps the drivers it can read when one entry is unreadable', async () => {
+  engineAnswers([{ id: { a: 1 }, required_fields: ['file'] }, SQLITE]);
+  saveMock.mockResolvedValue({
+    id: 'a1', name: 'local', driver: 'sqlite', file: '/tmp/a.db',
+    color: '#3d7d55', read_only: false,
+  });
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+
+  await fill('local', '/tmp/a.db');
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  expect(saveMock.mock.calls[0][0].driver).toBe('sqlite');
 });
 
 /*
