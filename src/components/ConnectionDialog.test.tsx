@@ -771,6 +771,35 @@ it('says so when the engine reports no drivers at all', async () => {
 });
 
 /*
+ * E2-2. A driver requiring a field literally called `name`.
+ *
+ * Unreachable from SQLite and entirely reachable from any driver that names
+ * one — the form is generic now precisely so drivers can. Both inputs used
+ * to emit `id="conn-name"`, so the dialog's own label addressed whichever
+ * came first, and one shared `invalid` marker lit both.
+ */
+it('keeps a driver field called name apart from the dialog’s own Name', async () => {
+  driversMock.mockResolvedValue([{ ...SQLITE, required_fields: ['name'] }]);
+  render(<ConnectionDialog open onClose={() => {}} onSaved={() => {}} />);
+  await driversLoaded();
+
+  // Two controls, two ids, and each label pointing at its own — a shared id
+  // would collapse these to one element twice over.
+  const [dialogName, driverName] = screen.getAllByLabelText(/name/i) as HTMLInputElement[];
+  expect(driverName).toBeDefined();
+  expect(dialogName.id).not.toBe(driverName.id);
+
+  // The dialog's own Name is filled and the driver's is not, so the refusal
+  // is about exactly one of them.
+  fireEvent.change(dialogName, { target: { value: 'local' } });
+  await act(async () => { screen.getByRole('button', { name: /^connect$/i }).click(); });
+
+  expect(saveMock).not.toHaveBeenCalled();
+  expect(driverName.getAttribute('aria-invalid')).toBe('true');
+  expect(dialogName.getAttribute('aria-invalid')).toBeNull();
+});
+
+/*
  * E2-1. A drivers.list answer the engine should never produce, and four
  * shapes a reviewer produced anyway.
  *

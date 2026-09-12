@@ -50,6 +50,26 @@ function fieldLabel(field: string): string {
   return field.charAt(0).toUpperCase() + field.slice(1);
 }
 
+/**
+ * The id of the dialog's own Name input — the record's name, which every
+ * driver needs and no driver dials with.
+ */
+const NAME_ID = 'conn-name';
+
+/**
+ * The id of the input for one field the ENGINE named.
+ *
+ * Namespaced apart from NAME_ID, because the field list is the engine's and
+ * a driver is free to require a field called `name`: two inputs under one id
+ * point the dialog's own label at whichever the document holds first, and
+ * make one invalid marker light both. Unreachable from SQLite, reachable
+ * from any driver that names such a field — and this form is generic
+ * precisely so drivers can.
+ */
+function fieldId(field: string): string {
+  return `conn-field-${field}`;
+}
+
 // Every control a keyboard user can land on inside the dialog, in DOM
 // order — a disabled control (Connect and Test Connection, while the driver
 // list is missing) is excluded automatically. Used both to seed focus on
@@ -76,10 +96,14 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
    */
   const [values, setValues] = useState<Record<string, string>>({});
   /**
-   * The fields the last refusal named, so each one can mark itself invalid.
-   * Separate from `formError` because one refusal can name several fields and
-   * matching on the rendered sentence to find out which is a trick that
-   * breaks the moment the sentence changes.
+   * The INPUT IDS the last refusal named, so each one can mark itself
+   * invalid. Separate from `formError` because one refusal can name several
+   * fields and matching on the rendered sentence to find out which is a
+   * trick that breaks the moment the sentence changes.
+   *
+   * Ids rather than field names: the dialog's own Name and a driver-required
+   * field called `name` are two different controls, and only the ids tell
+   * them apart (see fieldId).
    */
   const [invalid, setInvalid] = useState<string[]>([]);
   const [color, setColor] = useState<string>(DEFAULT_COLOR);
@@ -249,7 +273,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
   /** Refuses the same way the engine does, naming what is missing. */
   function refuseMissing(missing: string[]) {
     setFormError({ message: `${missing.map(fieldLabel).join(', ')} is required` });
-    setInvalid(missing);
+    setInvalid(missing.map(fieldId));
   }
 
   function selectDriver(id: string) {
@@ -324,7 +348,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
     const trimmedName = name.trim();
     if (!trimmedName) {
       setFormError({ message: 'Name is required' });
-      setInvalid(['name']);
+      setInvalid([NAME_ID]);
       return;
     }
     const missing = missingFields();
@@ -432,11 +456,11 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
           </div>
 
           <div className="field">
-            <label className="field-label" htmlFor="conn-name">
+            <label className="field-label" htmlFor={NAME_ID}>
               Name<span aria-hidden="true"> *</span>
             </label>
             <input
-              id="conn-name"
+              id={NAME_ID}
               ref={nameInputRef}
               className="text-input"
               type="text"
@@ -444,7 +468,7 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
               onChange={(e) => setName(e.target.value)}
               placeholder="local"
               aria-required="true"
-              aria-invalid={invalid.includes('name') ? 'true' : undefined}
+              aria-invalid={invalid.includes(NAME_ID) ? 'true' : undefined}
             />
           </div>
 
@@ -456,19 +480,19 @@ export function ConnectionDialog({ open, onClose, onSaved }: ConnectionDialogPro
           */}
           {requiredFields.map((field) => (
             <div className="field" key={field}>
-              <label className="field-label" htmlFor={`conn-${field}`}>
+              <label className="field-label" htmlFor={fieldId(field)}>
                 {fieldLabel(field)}
                 <span aria-hidden="true"> *</span>
               </label>
               <input
-                id={`conn-${field}`}
+                id={fieldId(field)}
                 className="text-input mono"
                 type="text"
                 value={values[field] ?? ''}
                 onChange={(e) => setValues((prev) => ({ ...prev, [field]: e.target.value }))}
                 placeholder={FIELD_PLACEHOLDERS[field]}
                 aria-required="true"
-                aria-invalid={invalid.includes(field) ? 'true' : undefined}
+                aria-invalid={invalid.includes(fieldId(field)) ? 'true' : undefined}
               />
             </div>
           ))}
