@@ -82,6 +82,11 @@ func TestSuiteFailsADriverThatViolatesEachInvariant(t *testing.T) {
 		{"a bad cursor is refused with the wrong kind", func(d *brokenDriver) { d.wrongKindInvalid = true }, "invalid"},
 
 		{"an empty table returns no columns", func(d *brokenDriver) { d.emptyHasNoColumns = true }, "still has a shape"},
+		// Distinct from the case above, and the distinction is the whole
+		// point: a non-nil empty slice marshals to [] and is merely the wrong
+		// answer, a nil one marshals to null and is the answer that blanks
+		// the window. A Go-side len() cannot tell them apart.
+		{"an empty table's columns marshal as null", func(d *brokenDriver) { d.emptyHasNullColumns = true }, "never as null"},
 		{"an empty table returns rows", func(d *brokenDriver) { d.emptyHasRows = true }, "there are none"},
 		{"an empty table does not report exhaustion", func(d *brokenDriver) { d.emptyNotExhausted = true }, "exhausted"},
 	} {
@@ -312,9 +317,10 @@ type brokenDriver struct {
 	refuseOwnCursor  bool
 	wrongKindInvalid bool
 
-	emptyHasNoColumns bool
-	emptyHasRows      bool
-	emptyNotExhausted bool
+	emptyHasNoColumns   bool
+	emptyHasNullColumns bool
+	emptyHasRows        bool
+	emptyNotExhausted   bool
 
 	// stmts records every statement the suite issued, so a test can assert
 	// which DDL was used.
@@ -660,6 +666,11 @@ func (c *brokenConn) Browse(_ context.Context, req driver.BrowseRequest) (*drive
 
 	if len(fx.rows) == 0 {
 		if c.d.emptyHasNoColumns {
+			// Non-nil, so this break is the shape defect alone: it marshals
+			// to [] and only the len() check has anything to say about it.
+			page.Columns = []driver.ColumnMeta{}
+		}
+		if c.d.emptyHasNullColumns {
 			page.Columns = nil
 		}
 		if c.d.emptyHasRows {

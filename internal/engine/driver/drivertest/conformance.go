@@ -663,9 +663,25 @@ func checkCursor(ctx context.Context, t TestingT, br driver.Browser, database st
 		"a cursor replayed with no sort token alongside a non-empty After")
 }
 
-// checkEmptyTable is the shape an empty result has to keep. It is a JSON
-// assertion because the defect it guards against was one: Rows arriving as
-// null where the shell declares an array has blanked the whole app.
+// checkEmptyTable is the shape an empty result has to keep, including the
+// shape it has on the wire.
+//
+// The wire assertion is on Columns, and it is the only one that can be. Rows
+// arriving as null where the shell declares an array is the defect that
+// blanked the whole app, but BrowsePage.MarshalJSON now rewrites a nil Rows
+// to [] for EVERY driver alike — so asserting it here would assert the
+// marshaller rather than the driver, and no driver could fail it. A check
+// that cannot fail certifies everything, which is the exact failure this
+// suite exists to avoid; the guarantee is owned by driver's own
+// TestBrowsePageWithZeroRowsSerializesAsEmptyArrayNotNull, where deleting it
+// actually reddens something.
+//
+// Columns has no such rewrite. A driver that leaves it nil sends the literal
+// null, unaltered, to a shell that declares an array — the same defect, on
+// the field where a driver's own choice still reaches the wire. That is why
+// the two states a Go-side len() cannot tell apart are told apart here: a
+// non-nil empty slice is a driver that answered "no columns" (wrong, but it
+// marshals to []), a nil one is a driver that answered null.
 func checkEmptyTable(ctx context.Context, t TestingT, br driver.Browser, database string) {
 	t.Helper()
 	p, err := br.Browse(ctx, driver.BrowseRequest{
@@ -674,18 +690,20 @@ func checkEmptyTable(ctx context.Context, t TestingT, br driver.Browser, databas
 	if !succeeded(t, err, "browsing the empty table %q", TableEmpty) {
 		return
 	}
-	// Marshalled before the nil check, deliberately: a nil page marshals to
-	// the literal null, which is exactly the failure this asserts against.
-	// json.Marshal cannot fail for a BrowsePage — every field is a string,
-	// a bool or an int — so its error is dropped rather than branched on.
-	if b, _ := json.Marshal(p); !bytes.Contains(b, []byte(`"rows":[]`)) {
-		t.Errorf("the page for the empty table %q marshalled as %s; Rows must cross the "+
-			"wire as [] and never as null", TableEmpty, b)
-	}
 	if p == nil {
+		t.Errorf("browsing the empty table %q returned a nil page and no error", TableEmpty)
 		return
 	}
-	if len(p.Columns) == 0 {
+	// json.Marshal cannot fail for a BrowsePage — every field is a string, a
+	// bool or an int — so its error is dropped rather than branched on.
+	b, _ := json.Marshal(p)
+	switch {
+	case bytes.Contains(b, []byte(`"columns":null`)):
+		t.Errorf("the page for the empty table %q marshalled as %s; Columns must cross the "+
+			"wire as an array and never as null — nothing rewrites it on the way out the way "+
+			"BrowsePage.MarshalJSON rewrites Rows, so a nil slice here is exactly what the "+
+			"shell receives", TableEmpty, b)
+	case len(p.Columns) == 0:
 		t.Errorf("browsing the empty table %q returned no columns; an empty table "+
 			"still has a shape, and the grid draws it", TableEmpty)
 	}
