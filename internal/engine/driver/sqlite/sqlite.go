@@ -267,9 +267,15 @@ func (c *conn) Columns(ctx context.Context, database, table string) ([]schema.Co
 	}
 	defer rows.Close()
 
-	// A non-nil empty slice means "read, and there are none" — distinct from
-	// nil, which means "not read yet".
-	cols := []schema.Column{}
+	// Left nil rather than initialised non-empty, because the "read, and
+	// there are none" state Conn.Introspect draws that distinction for does
+	// not exist here: SQLite has no table with zero columns, and PRAGMA
+	// table_info answers a table that does not exist with zero rows rather
+	// than an error — so an empty result means MISSING, which is what the
+	// check below turns it into. A non-nil empty slice could never escape
+	// this function, and a comment claiming it meant something described a
+	// state four lines of code made unreachable.
+	var cols []schema.Column
 	for rows.Next() {
 		var (
 			cid       int
@@ -293,8 +299,9 @@ func (c *conn) Columns(ctx context.Context, database, table string) ([]schema.Co
 	if err := rows.Err(); err != nil {
 		return nil, classify(err, stmt)
 	}
-	// PRAGMA on a table that does not exist returns zero rows rather than an
-	// error, so an empty result here means the table is missing.
+	// The check the accumulator above is nil for: zero rows is SQLite's
+	// answer for a table that is not there. TestColumnsOnAMissingTableIsNotFound
+	// is what keeps this the only way out of an empty read.
 	if len(cols) == 0 {
 		return nil, dberr.New(dberr.KindNotFound, "no such table: "+table).WithQuery(stmt)
 	}

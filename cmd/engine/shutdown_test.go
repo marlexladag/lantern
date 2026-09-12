@@ -84,8 +84,14 @@ func newSpyConn(t *testing.T) *spyConn {
 
 func (c *spyConn) Ping(context.Context) error { return nil }
 
+// Introspect leaves Tables NIL, which is the contract Conn.Introspect states
+// in so many words: tier one reads the database list only, and Tables stays
+// nil until Conn.Tables is called. This fake used to return an empty slice,
+// which says "read, and there are none" — the opposite claim, from a stand-in
+// whose whole job is to look like the thing it replaces to the code under
+// test. openSpySessions asserts it, so a copy of this fake cannot drift back.
 func (c *spyConn) Introspect(context.Context) (*schema.Catalog, error) {
-	return &schema.Catalog{Databases: []schema.Database{{Name: "main", Tables: []schema.Table{}}}}, nil
+	return &schema.Catalog{Databases: []schema.Database{{Name: "main"}}}, nil
 }
 
 func (c *spyConn) Tables(context.Context, string) ([]schema.Table, error) {
@@ -167,11 +173,47 @@ func openSpySessions(t *testing.T, conns ...*spyConn) *api.Sessions {
 		if err != nil {
 			t.Fatalf("marshal params: %v", err)
 		}
-		if _, err := h(context.Background(), params); err != nil {
+		res, err := h(context.Background(), params)
+		if err != nil {
 			t.Fatalf("session.open: %v", err)
 		}
+		requireLazyCatalog(t, res)
 	}
 	return sess
+}
+
+// requireLazyCatalog holds the spy to the contract it stands in for. A fake
+// that violates the contract written in the same commit teaches the wrong
+// shape to whoever copies it next, and nothing else in this package looks at
+// what its Introspect returns — so the one call that does is asserted here,
+// over the JSON the shell would actually receive.
+func requireLazyCatalog(t *testing.T, res any) {
+	t.Helper()
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatalf("marshal session.open result: %v", err)
+	}
+	var opened struct {
+		Catalog struct {
+			Databases []struct {
+				Name   string          `json:"name"`
+				Tables json.RawMessage `json:"tables"`
+			} `json:"databases"`
+		} `json:"catalog"`
+	}
+	if err := json.Unmarshal(raw, &opened); err != nil {
+		t.Fatalf("decode session.open result: %v", err)
+	}
+	if len(opened.Catalog.Databases) == 0 {
+		t.Fatal("the spy reported no databases; every later call names one")
+	}
+	for _, db := range opened.Catalog.Databases {
+		if string(db.Tables) != "null" {
+			t.Errorf("the spy's database %q arrived with tables %s; tier one reads the "+
+				"database list ONLY, and a non-nil empty slice means \"read, and there are "+
+				"none\" — the opposite claim", db.Name, db.Tables)
+		}
+	}
 }
 
 // Required adversarial test: a session open at signal time gets closed, and
